@@ -1408,30 +1408,28 @@
 
   // الحد الذكي لزبون واحد (عملة الأساس، قبل التنعيم والتقريب). auto: نتيجة computeAutoCredit نفسها
   // (حالة التعثّر/الخمول/الدفع المسبق والدورة وانتظام الدفع) — لا حكم ثانٍ يناقضها.
-  function computeSmartCredit(facts, auto, stats, balance, referenceDay) {
-    const S = CONFIG.smartCredit;
+  // حالات المحرك التي تحسم الحد الذكي قبل أي حساب (لا رقم، أو صفر فوري).
+  function smartStatusGate(facts, auto) {
     if (!auto || auto.status === "unavailable" || !facts) return smartResult("unavailable", (auto?.notes || [])[0] || "لا دفتر حساب لهذا الزبون.");
     if (auto.status === "non_customer") return smartResult("not_customer", (auto.notes || [])[0]);
     if (auto.status === "needs_review") return smartResult("needs_review", (auto.notes || [])[0]);
     if (auto.status === "delinquent") return { ...smartResult("delinquent", "متعثّر: دين متأخر لا تغطيه دفعات مدته، فالحد الذكي صفر فوراً."), limitBase: 0, limit: 0 };
     if (auto.status === "inactive") return { ...smartResult("inactive", "لا سحب خلال 60 يوماً، فلا حد ذكي (وليس متعثّراً)."), limitBase: 0, limit: 0 };
     if (auto.status === "prepaid") return smartResult("prepaid", "رصيده دائن ويدفع قبل أن يسحب: لا تعرّض ائتماني.");
+    return null;
+  }
 
-    const smart = { ...facts.smart };
-    smart.tenureDays = smart.firstActivityDay === null ? 0 : referenceDay - smart.firstActivityDay;
-    const windows = smart.windows;
-    const thirty = windows[0];
-    const widest = windows.filter((entry) => entry.covered).pop() || null;
-    const settled = (facts.settledSales || []).length;
-    const payments90 = widest ? widest.payments : 0;
-    const inputs = {
-      windows: windows.map((entry) => ({
+  const smartWindowOut = (entry, value) => (entry.covered ? round(value, 3) : null);
+
+  function smartInputsOf(facts, smart, settled) {
+    return {
+      windows: smart.windows.map((entry) => ({
         days: entry.days,
         covered: entry.covered,
-        draw: entry.covered ? round(entry.draw, 3) : null,
-        returns: entry.covered ? round(entry.returns, 3) : null,
-        net: entry.covered ? round(entry.draw - entry.returns, 3) : null,
-        payments: entry.covered ? round(entry.payments, 3) : null
+        draw: smartWindowOut(entry, entry.draw),
+        returns: smartWindowOut(entry, entry.returns),
+        net: smartWindowOut(entry, entry.draw - entry.returns),
+        payments: smartWindowOut(entry, entry.payments)
       })),
       saleInvoices: facts.debitCount,
       settledSales: settled,
@@ -1439,12 +1437,46 @@
       tenureDays: smart.tenureDays,
       averageBalance: round(smart.averageBalance, 3)
     };
-    const missing = [];
-    if (!thirty.covered || !widest) missing.push("الدفتر لا يغطي آخر 30 يوماً");
-    if (facts.debitCount < S.minSaleInvoices) missing.push(`${facts.debitCount} فاتورة بيع فقط (المطلوب ≥ ${S.minSaleInvoices})`);
-    if (settled < S.minSettledSales) missing.push(`${settled} فاتورة مسددة فعلاً (المطلوب ≥ ${S.minSettledSales})`);
-    if (smart.paymentCount < S.minPayments90) missing.push(`${smart.paymentCount} دفعة خلال ${widest ? widest.days : 90} يوماً (المطلوب ≥ ${S.minPayments90})`);
-    if (smart.tenureDays < S.minTenureDays) missing.push(`عمر التعامل ${smart.tenureDays} يوماً (المطلوب ≥ ${S.minTenureDays})`);
+  }
+
+  // الحدود الدنيا للبيانات: أي نقص ⇒ لا رقم، مع الأسباب.
+  function smartMissingReasons(facts, smart, settled, thirty, widest) {
+    const S = CONFIG.smartCredit;
+    const checks = [
+      [!thirty.covered || !widest, "الدفتر لا يغطي آخر 30 يوماً"],
+      [facts.debitCount < S.minSaleInvoices, `${facts.debitCount} فاتورة بيع فقط (المطلوب ≥ ${S.minSaleInvoices})`],
+      [settled < S.minSettledSales, `${settled} فاتورة مسددة فعلاً (المطلوب ≥ ${S.minSettledSales})`],
+      [smart.paymentCount < S.minPayments90, `${smart.paymentCount} دفعة خلال ${widest ? widest.days : 90} يوماً (المطلوب ≥ ${S.minPayments90})`],
+      [smart.tenureDays < S.minTenureDays, `عمر التعامل ${smart.tenureDays} يوماً (المطلوب ≥ ${S.minTenureDays})`]
+    ];
+    return checks.filter(([failed]) => failed).map(([, text]) => text);
+  }
+
+  // ملاحظات تفسّر ما حصر الحد أو خفّضه.
+  function smartNotesOf(c, widest) {
+    const S = CONFIG.smartCredit;
+    const notes = [];
+    if (c.formula > c.paymentCap) notes.push(`سقف القدرة: الحد لا يتجاوز ما دفعه فعلاً خلال ${widest.days} يوماً (${Math.round(c.paymentCap)}$).`);
+    if (c.paymentMonthly > S.drawHeadroom * c.netMonthly) notes.push("دفعاته أعلى من حاجته الشرائية (تسديد دين قديم غالباً)، فالقدرة محصورة بـ1.25× صافي سحبه.");
+    if (c.returnsFactor < 1) notes.push(`المرتجعات ${Math.round(c.returnsShare * 100)}% من السحب خفّضت الحد ${Math.round((1 - c.returnsFactor) * 100)}%.`);
+    if (c.horizonDays <= S.cashHorizonDays) notes.push(`يسدّد خلال ${Math.max(1, Math.round(c.horizonDays))} يوم تقريباً: حاجته الفعلية للآجل صغيرة، فالحد الذكي صغير وقد يُقرَّب إلى صفر.`);
+    if (c.overdueFactor < 1) notes.push(`دين متأخر يمثل ${Math.round(c.overdueShare * 100)}% من الرصيد خفّض الحد ${Math.round((1 - c.overdueFactor) * 100)}%.`);
+    return notes;
+  }
+
+  function computeSmartCredit(facts, auto, stats, balance, referenceDay) {
+    const S = CONFIG.smartCredit;
+    const gated = smartStatusGate(facts, auto);
+    if (gated) return gated;
+
+    const smart = { ...facts.smart };
+    smart.tenureDays = smart.firstActivityDay === null ? 0 : referenceDay - smart.firstActivityDay;
+    const windows = smart.windows;
+    const thirty = windows[0];
+    const widest = windows.filter((entry) => entry.covered).pop() || null;
+    const settled = (facts.settledSales || []).length;
+    const inputs = smartInputsOf(facts, smart, settled);
+    const missing = smartMissingReasons(facts, smart, settled, thirty, widest);
     if (missing.length) return smartResult("insufficient", `بيانات غير كافية لحد ذكي موثوق: ${missing.join("، ")}.`, { inputs });
 
     const netMonthly = smartWeighted(windows, (entry) => entry.draw - entry.returns);
@@ -1474,14 +1506,9 @@
     const overdueShare = balance > 0 && Number.isFinite(auto.balanceSupportedOverdue) ? clamp(auto.balanceSupportedOverdue / balance, 0, 1) : 0;
     const overdueFactor = 1 - S.overdueMaxPenalty * overdueShare;
     const formula = core * multiplier * returnsFactor * overdueFactor;
-    const paymentCap = payments90;
+    const paymentCap = widest.payments;
     const limitRaw = Math.max(0, Math.min(formula, paymentCap));
-    const notes = [];
-    if (formula > paymentCap) notes.push(`سقف القدرة: الحد لا يتجاوز ما دفعه فعلاً خلال ${widest.days} يوماً (${Math.round(paymentCap)}$).`);
-    if (paymentMonthly > S.drawHeadroom * netMonthly) notes.push("دفعاته أعلى من حاجته الشرائية (تسديد دين قديم غالباً)، فالقدرة محصورة بـ1.25× صافي سحبه.");
-    if (returnsFactor < 1) notes.push(`المرتجعات ${Math.round(returnsShare * 100)}% من السحب خفّضت الحد ${Math.round((1 - returnsFactor) * 100)}%.`);
-    if (horizonDays <= S.cashHorizonDays) notes.push(`يسدّد خلال ${Math.max(1, Math.round(horizonDays))} يوم تقريباً: حاجته الفعلية للآجل صغيرة، فالحد الذكي صغير وقد يُقرَّب إلى صفر.`);
-    if (overdueFactor < 1) notes.push(`دين متأخر يمثل ${Math.round(overdueShare * 100)}% من الرصيد خفّض الحد ${Math.round((1 - overdueFactor) * 100)}%.`);
+    const notes = smartNotesOf({ formula, paymentCap, paymentMonthly, netMonthly, returnsFactor, returnsShare, horizonDays, overdueFactor, overdueShare }, widest);
 
     return {
       status: "normal",
@@ -1547,32 +1574,43 @@
   }
 
   // سبب الزيادة أو التخفيض عن آخر لقطة: أكبر تغيّر في الدرجات أو في القدرة/الأفق، بالأرقام.
+  // لا تغيير رقمي: إما تغيّرت الحالة، أو بقي الحد كما هو، أو لا لقطة سابقة.
+  function smartUnchangedOf(smart, previous) {
+    if (!previous) return null;
+    if (previous.status !== smart.status) {
+      return { direction: null, previousDate: previous.date, previousLimit: previous.limit ?? null, text: `تغيّرت الحالة من «${SMART_STATUS_LABELS[previous.status]}» إلى «${SMART_STATUS_LABELS[smart.status]}».` };
+    }
+    return { direction: "flat", previousDate: previous.date, previousLimit: previous.limit ?? null, text: "لا تغيير عن آخر لقطة." };
+  }
+
+  // أكبر عاملين تحرّكا في اتجاه التغيير، وتغيّر القدرة الشهرية إن تجاوز 5%.
+  function smartMovedReasons(smart, previous, up) {
+    const sign = up ? 1 : -1;
+    const P = previous.scores || {};
+    const C = smart.scores || {};
+    const reasons = Object.keys(SMART_FACTOR_LABELS)
+      .filter((key) => Number.isFinite(P[key]) && Number.isFinite(C[key]) && Math.sign(C[key] - P[key]) === sign)
+      .sort((a, b) => Math.abs(C[b] - P[b]) - Math.abs(C[a] - P[a]))
+      .slice(0, 2)
+      .map((key) => `${up ? "تحسّن" : "تراجع"} ${SMART_FACTOR_LABELS[key]} (${Math.round(P[key] * 100)}% ← ${Math.round(C[key] * 100)}%)`);
+    const capPrev = previous.capacityMonthly;
+    const capNow = smart.components?.capacityMonthly;
+    const capMoved = Number.isFinite(capPrev) && Number.isFinite(capNow) && capPrev > 0
+      && Math.sign(capNow - capPrev) === sign && Math.abs(capNow - capPrev) / capPrev >= 0.05;
+    if (capMoved) reasons.push(`القدرة الشهرية على السداد صارت ${Math.round(capNow)}$ بدل ${Math.round(capPrev)}$`);
+    if (!reasons.length) reasons.push(smart.smoothing?.applied ? "التنعيم اليومي يقرّبه تدريجياً من الحد المحسوب" : "تغيّر مجمل في مكوّنات الحساب");
+    return reasons;
+  }
+
+  const SMART_STATUS_CHANGE_REASON = { delinquent: "صار متعثّراً", inactive: "توقف عن السحب" };
+
   function smartChangeOf(smart, previous) {
     if (!previous || !SMART_NUMERIC_STATUSES.has(smart.status) || !Number.isFinite(previous.limit) || previous.limit === smart.limit) {
-      if (previous && previous.status !== smart.status) {
-        return { direction: null, previousDate: previous.date, previousLimit: previous.limit ?? null, text: `تغيّرت الحالة من «${SMART_STATUS_LABELS[previous.status]}» إلى «${SMART_STATUS_LABELS[smart.status]}».` };
-      }
-      return previous ? { direction: "flat", previousDate: previous.date, previousLimit: previous.limit ?? null, text: "لا تغيير عن آخر لقطة." } : null;
+      return smartUnchangedOf(smart, previous);
     }
     const up = smart.limit > previous.limit;
-    const reasons = [];
-    if (smart.status === "delinquent") reasons.push("صار متعثّراً");
-    else if (smart.status === "inactive") reasons.push("توقف عن السحب");
-    else {
-      const P = previous.scores || {};
-      const C = smart.scores || {};
-      const moved = Object.keys(SMART_FACTOR_LABELS)
-        .filter((key) => Number.isFinite(P[key]) && Number.isFinite(C[key]) && Math.sign(C[key] - P[key]) === (up ? 1 : -1))
-        .sort((a, b) => Math.abs(C[b] - P[b]) - Math.abs(C[a] - P[a]))
-        .slice(0, 2);
-      moved.forEach((key) => reasons.push(`${up ? "تحسّن" : "تراجع"} ${SMART_FACTOR_LABELS[key]} (${Math.round(P[key] * 100)}% ← ${Math.round(C[key] * 100)}%)`));
-      const capPrev = previous.capacityMonthly;
-      const capNow = smart.components?.capacityMonthly;
-      if (Number.isFinite(capPrev) && Number.isFinite(capNow) && capPrev > 0 && Math.sign(capNow - capPrev) === (up ? 1 : -1) && Math.abs(capNow - capPrev) / capPrev >= 0.05) {
-        reasons.push(`القدرة الشهرية على السداد صارت ${Math.round(capNow)}$ بدل ${Math.round(capPrev)}$`);
-      }
-      if (!reasons.length) reasons.push(smart.smoothing?.applied ? "التنعيم اليومي يقرّبه تدريجياً من الحد المحسوب" : "تغيّر مجمل في مكوّنات الحساب");
-    }
+    const statusReason = SMART_STATUS_CHANGE_REASON[smart.status];
+    const reasons = statusReason ? [statusReason] : smartMovedReasons(smart, previous, up);
     return {
       direction: up ? "up" : "down",
       previousDate: previous.date,
