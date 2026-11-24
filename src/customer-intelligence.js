@@ -1641,7 +1641,8 @@
 
   // بوابة البيانات: فجوة مصدر (رصيد/فواتير/حركات غير حديثة، يومان محاسبيان، بلا مصدر موسوم، بلا
   // سعر صرف، رصيد مجهول) ⇒ «غير متاح» بلا رقم — البوابات نفسها التي تُغلق الحد المقترح.
-  function smartCreditGate(smart, auto, credit) {
+  function smartCreditGate(smart, auto, credit, isSupplier = false) {
+    if (isSupplier) return null;
     if (HISTORY_GAP_CREDIT_STATUSES.has(credit.proposedCreditStatus ?? credit.creditStatus)) {
       return smartResult("unavailable", "مصادر البيانات غير حديثة أو غير مكتملة الآن، فلا حد ذكي حتى تتحدّث المزامنة.");
     }
@@ -1649,6 +1650,13 @@
     if (auto?.status === "non_customer") return smartResult("not_customer", (auto.notes || [])[0]);
     if (auto?.status === "needs_review") return smartResult("needs_review", (auto.notes || [])[0]);
     return smartResult("unavailable", (auto?.notes || [])[0] || "لا دفتر حساب لهذا الزبون.");
+  }
+
+  // الحد الذكي النهائي لصف واحد: بلا حد (مورد) ⇒ null؛ بلا تاريخ مقروء ⇒ أول احتساب.
+  function finalizeSmartCreditOf(smart, historyIndex, customerGuid, meta) {
+    if (!smart) return null;
+    const history = historyIndex ? historyIndex.get(customerGuid) || [] : null;
+    return finalizeSmartCredit(smart, history, meta);
   }
 
   // ما تحفظه اللقطة اليومية من الحد الذكي (داخل factors، بلا عمود جديد).
@@ -2865,7 +2873,7 @@
         credit.overLimitAmount = null;
       }
       attachApprovedCredit(credit, record.balanceRow, approvedEntry, display);
-      credit.smartCredit = isSupplierRecord ? null : smartCreditGate(smartCredit, auto, credit);
+      credit.smartCredit = smartCreditGate(smartCredit, auto, credit, isSupplierRecord);
 
       // أصناف مختلطة العملة: لا نجمع lineTotals بعملات مختلفة — نُعيد صفر أصناف.
       const items = currencyMixed ? { items: [], identity: "item_guid" } : topItems(windowRows);
@@ -3242,9 +3250,7 @@
         approvedCredit: draft.credit.approvedCredit,
         ameenCreditLimit: draft.credit.ameenCreditLimit,
         exchangeRate: draft.credit.exchangeRate,
-        smartCredit: draft.credit.smartCredit
-          ? finalizeSmartCredit(draft.credit.smartCredit, historyIndex ? historyIndex.get(draft.record.customerGuid) || [] : null, smartMeta)
-          : null,
+        smartCredit: finalizeSmartCreditOf(draft.credit.smartCredit, historyIndex, draft.record.customerGuid, smartMeta),
 
         topItems: draft.items.items,
         topItemsIdentity: draft.items.identity,
