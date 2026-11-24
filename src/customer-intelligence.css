@@ -301,6 +301,7 @@
   border: 1px solid rgba(176, 140, 79, 0.45);
 }
 .ci-detail .ci-approved,
+.ci-detail .ci-smart-detail,
 .ci-detail .ci-proposal {
   margin: 10px 0 14px;
   padding: 10px 12px;
@@ -308,6 +309,7 @@
   border: 1px solid rgba(176, 140, 79, 0.25);
 }
 .ci-detail .ci-approved p,
+.ci-detail .ci-smart-detail p,
 .ci-detail .ci-proposal p { margin: 4px 0; font-size: 0.88rem; line-height: 1.8; }
 .ci-detail .ci-formula { font-weight: 600; }
 .ci-detail .ci-mini-wrap { overflow-x: auto; }
@@ -317,6 +319,26 @@
 .ci-detail .ci-approve { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 8px; }
 .ci-detail .ci-approve label { display: flex; flex-direction: column; gap: 4px; font-size: 0.8rem; }
 .ci-detail .ci-approve input { min-width: 140px; max-width: 100%; }
+
+/* الحد الذكي: الخلية زرّ يفتح تفاصيل الاحتساب — بلا تغيير في هوية الجدول. */
+.customer-intel .ci-smart-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted rgba(176, 140, 79, 0.6);
+  text-underline-offset: 3px;
+}
+.customer-intel .ci-smart-link:hover,
+.customer-intel .ci-smart-link:focus-visible { color: #d9a94f; }
+.customer-intel .ci-smart-dir { font-size: 0.65rem; }
+.customer-intel .ci-smart-dir.good { color: #4caf7d; }
+.customer-intel .ci-smart-dir.bad { color: #e2725b; }
+.ci-detail .ci-smart-detail { scroll-margin-top: 12px; }
+.ci-detail .ci-mini td.good { color: #4caf7d; }
+.ci-detail .ci-mini td.bad { color: #e2725b; }
 
 @media (max-width: 640px) {
   .customer-intel .ci-cards { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }

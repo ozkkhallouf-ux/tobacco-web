@@ -168,6 +168,42 @@
       secondaryFactorShare: 0.3        // عامل ثانٍ يُذكر في التفسير إن بلغ 30% من أثر الأول
     }),
 
+    // ── الحد الذكي (طلب المالك 2026-11-24) ─────────────────────────────────
+    // حد ثانٍ مستقل يُعرض بجانب المقترح ولا يمسّه: أساسه القدرة الفعلية على السداد (الدفعات
+    // الحقيقية) لا حجم المشتريات وحده. لا يدخل الاستخدام ولا المتاح ولا التجاوز ولا الحد
+    // المعتمد، ولا يُكتب إلى الأمين. يُعاد حسابه مع كل تحميل من أحدث البيانات، وتحفظه اللقطة
+    // اليومية في customer_credit_history.factors.smart (بلا عمود جديد) أساساً للتنعيم اليومي.
+    smartCredit: Object.freeze({
+      windowsDays: Object.freeze([30, 60, 90]),
+      // أوزان الحداثة: آخر 30 يوماً أثقل، و90 يوماً تثبّت الصورة. نافذة غير مغطاة تخرج وتُعاد الأوزان.
+      windowWeights: Object.freeze([0.5, 0.3, 0.2]),
+      // القدرة الشهرية لا تتجاوز صافي السحب الشهري × 1.25: الحد لحاجة شراء فعلية لا لتسديد دين قديم.
+      drawHeadroom: 1.25,
+      // درجة السلوك S ∈ [0, 1] ⇒ المضاعف = 0.5 + 0.7 × S ∈ [0.5, 1.2].
+      multiplierMin: 0.5,
+      multiplierSpan: 0.7,
+      scoreWeights: Object.freeze({ regularity: 0.2, punctuality: 0.25, coverage: 0.2, accumulation: 0.15, trend: 0.1, tenure: 0.1 }),
+      coverageFloor: 0.7,              // تغطية الدفعات للسحب الصافي: 70% ⇒ 0، و100% ⇒ 1
+      accumulationMaxShare: 0.5,       // نمو الرصيد خلال 90 يوماً بنصف سحبها ⇒ درجة صفر
+      // عمر تعامل 90 يوماً فأكثر ⇒ درجة كاملة. تقرير الحركات يغطي 92 يوماً، فالتاريخ الأقدم لا يُرى
+      // (القيد الافتتاحي المرحَّل يثبت أن التعامل أقدم من النافذة).
+      tenureFullDays: 90,
+      cashHorizonDays: 2,              // أفق ≤ يومين: يسدّد فوراً تقريباً، فحاجته للآجل صغيرة
+      returnsFreeShare: 0.1,           // مرتجعات حتى 10% من السحب طبيعية
+      returnsMaxShare: 0.4,            // ومن 40% يبلغ الخصم أقصاه
+      returnsMaxPenalty: 0.3,          // أقصى خصم للمرتجعات 30%
+      overdueMaxPenalty: 0.5,          // دين متأخر (غير متعثّر) يخصم حتى 50% بنسبة حصته من الرصيد
+      // لا رقم بلا بيانات كافية: ≥ 4 فواتير بيع، ≥ 3 مسددة فعلاً، ≥ دفعتان خلال 90 يوماً، و≥ 45 يوماً.
+      minSaleInvoices: 4,
+      minSettledSales: 3,
+      minPayments90: 2,
+      minTenureDays: 45,
+      // التنعيم اليومي على آخر لقطة سابقة: +10% / −20% باليوم، وتغيّر < 5% لا يحرّك الحد.
+      maxDailyIncrease: 0.1,
+      maxDailyDecrease: 0.2,
+      deadband: 0.05
+    }),
+
     // ── تنبيه غياب الزبون المهم (CUSTOMER_INACTIVE_5D) ──────────────────────
     // «مهم» = أعلى 20% بصافي مشتريات 60 يوماً داخل عملته (عيّنة VIP نفسها وشرط
     // موثوقيتها: ≥ 5 مرشحين) أو شراء منتظم (≥ 4 أيام شراء في آخر 30 يوماً).
@@ -695,6 +731,7 @@
       if (acc.firstDebitDay === null || row.day < acc.firstDebitDay) acc.firstDebitDay = row.day;
       const age = span.referenceDay - row.day;
       span.drawWindows.forEach((days, index) => { if (age >= 0 && age < days) acc.drawTotals[index] += row.debit; });
+      span.smartWindows.forEach((days, index) => { if (age >= 0 && age < days) acc.smartDraws[index] += row.debit; });
       if (span.inWindow(row.day)) {
         acc.windowDebits.push({ day: row.day, amount: row.debit });
         if (row.day >= span.recentStart) acc.salesRecent += row.debit;
@@ -726,6 +763,10 @@
   function ledgerAddCredit(acc, row, span) {
     const metric = creditMetricKind(row);
     if (metric === "none") return;
+    // نوافذ الحد الذكي (30/60/90): الدفعات الحقيقية والمرتجعات حسب العمر — وصفية لا تمسّ v6.
+    const age = span.referenceDay - row.day;
+    const windows = metric === "payment" ? acc.smartPayments : metric === "return" ? acc.smartReturns : null;
+    if (windows) span.smartWindows.forEach((days, index) => { if (age >= 0 && age < days) windows[index] += row.credit; });
     if (metric === "return") {
       if (span.inWindow(row.day)) acc.returns60 += row.credit;
     } else if (metric === "payment") {
@@ -779,7 +820,8 @@
     // النافذة: يوم المرجع وستون يوماً قبله (أعمار 0..60)، والسابقة أعمار 30..60 —
     // مطابق للمحاكاة المعتمدة.
     const windowStart = referenceDay - A.salesWindowDays;
-    const span = { tolerance, recentStart, referenceDay, drawWindows: A.drawWindowsDays, inWindow: (day) => day >= windowStart && day <= referenceDay };
+    const smartWindows = CONFIG.smartCredit.windowsDays;
+    const span = { tolerance, recentStart, referenceDay, drawWindows: A.drawWindowsDays, smartWindows, inWindow: (day) => day >= windowStart && day <= referenceDay };
 
     const acc = {
       salesRecent: 0,
@@ -796,6 +838,9 @@
       openQueue: [],
       advanceQueue: [],
       drawTotals: A.drawWindowsDays.map(() => 0),
+      smartDraws: smartWindows.map(() => 0),
+      smartPayments: smartWindows.map(() => 0),
+      smartReturns: smartWindows.map(() => 0),
       debtAfterPayment: new Map()
     };
     let balance = 0;
@@ -803,10 +848,13 @@
     // مقاييس موسومة بالنوع (lineKinds:v1 وحده؛ بلا العلامة lineKind فارغ فتبقى أصفاراً).
     const kinds = { purchaseAmount: 0, saleAmount: 0, salePayments60: 0, returnsDiscounts60: 0, receiptDays: [] };
 
+    const smartSpanDays = smartWindows[smartWindows.length - 1];
+    let balanceSmartAgo = 0;
     for (const row of entry.rows) {
       balance += row.debit - row.credit;
       addLineKindFacts(kinds, row, span);
       if (row.day <= referenceDay - A.recentDays) balance30Ago += row.debit - row.credit;
+      if (row.day <= referenceDay - smartSpanDays) balanceSmartAgo += row.debit - row.credit;
       if (row.debit > 0) ledgerAddDebit(acc, row, span);
       if (row.credit > 0) ledgerAddCredit(acc, row, span);
     }
@@ -872,7 +920,9 @@
       oldestOpenAge,
       averageBalance60: averagePositiveBalance(entry.rows, firstBalanceDay, referenceDay),
       recentStart,
-      windowStart
+      windowStart,
+      // مدخلات الحد الذكي (وصفية؛ لا تدخل حساب v6): نوافذ 30/60/90 مغطاة أم لا بتقرير الحركات.
+      smart: smartFactsOf(acc, entry.rows, { referenceDay, ledgerStartDay, smartWindows, balanceSmartAgo, gaps })
     };
   }
 
@@ -1249,6 +1299,335 @@
     });
     return result;
   }
+  // --------------------------------------------------------------------------
+  // الحد الذكي (طلب المالك 2026-11-24): حد ثانٍ مستقل بجانب المقترح، أساسه القدرة الفعلية على
+  // السداد. لا يمسّ الحد المقترح ولا المعتمد ولا الاستخدام/المتاح/التجاوز، ولا يكتب شيئاً.
+  //
+  //   القدرة الشهرية = min(متوسط الدفعات الشهري، 1.25 × متوسط صافي السحب الشهري)   [30/60/90 مرجّحة]
+  //   الأفق (يوماً)  = min(دورة السداد الفعلية، أيام دوران الذمم DSO) محصوراً بين P10 وP90 للمحفظة؛
+  //                    وما زاد على وسيط المحفظة يُكتسب بنسبة التغطية × الالتزام بالمواعيد
+  //   الأساس          = القدرة الشهرية ÷ 30 × الأفق
+  //   الحد الذكي      = min(الأساس × مضاعف السلوك × عامل المرتجعات × عامل التأخر، دفعات 90 يوماً)
+  //   ثم تنعيم يومي (+10%/−20%، منطقة ميتة 5%) على آخر لقطة سابقة، ثم تقريب تجاري للأسفل.
+  // --------------------------------------------------------------------------
+
+  // حقائق النوافذ 30/60/90 من الدفتر: السحب (فواتير البيع)، المرتجعات، الدفعات الحقيقية.
+  function smartFactsOf(acc, rows, context) {
+    const { referenceDay, ledgerStartDay, smartWindows, balanceSmartAgo, gaps } = context;
+    const covered = (days) => ledgerStartDay === null || ledgerStartDay === undefined || ledgerStartDay <= referenceDay - days + 1;
+    const windows = smartWindows.map((days, index) => ({
+      days,
+      covered: covered(days),
+      draw: acc.smartDraws[index],
+      returns: acc.smartReturns[index],
+      payments: acc.smartPayments[index]
+    }));
+    const spanDays = smartWindows[smartWindows.length - 1];
+    const firstBalanceDay = Math.max(referenceDay - spanDays + 1, ledgerStartDay ?? referenceDay - spanDays + 1);
+    // انتظام الدفع: في كم «شهر» (أقسام 30 يوماً من نافذة 90) دفع فعلاً، وتشتّت الفواصل بين الدفعات.
+    const paymentDays = [...acc.paymentDays].filter((day) => day <= referenceDay && referenceDay - day < spanDays);
+    const buckets = new Set(paymentDays.map((day) => Math.floor((referenceDay - day) / 30)));
+    const coveredBuckets = windows.filter((entry) => entry.covered).length;
+    const meanGap = gaps.length ? gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length : null;
+    const gapCv = gaps.length >= 2 && meanGap > 0
+      ? Math.sqrt(gaps.reduce((sum, gap) => sum + (gap - meanGap) ** 2, 0) / gaps.length) / meanGap
+      : null;
+    return {
+      windows,
+      averageBalance: averagePositiveBalance(rows, firstBalanceDay, referenceDay),
+      balanceAgo: balanceSmartAgo,
+      firstActivityDay: rows.length ? rows[0].day : null,
+      paymentCount: paymentDays.length,
+      paymentBuckets: buckets.size,
+      coveredBuckets,
+      gapCv
+    };
+  }
+
+  const SMART_STATUS_LABELS = Object.freeze({
+    normal: "محسوب",
+    delinquent: "صفر: متعثّر",
+    inactive: "صفر: غير نشط",
+    prepaid: "لا تعرّض: دفع مسبق",
+    insufficient: "بيانات غير كافية",
+    not_customer: "ليس زبون مبيعات",
+    needs_review: "يحتاج مراجعة",
+    unavailable: "غير متاح"
+  });
+  const SMART_NUMERIC_STATUSES = new Set(["normal", "delinquent", "inactive"]);
+
+  const SMART_FACTOR_LABELS = Object.freeze({
+    regularity: "انتظام الدفعات",
+    punctuality: "الالتزام بمواعيد السداد",
+    coverage: "تغطية الدفعات للسحب",
+    accumulation: "تراكم الديون",
+    trend: "اتجاه المبيعات",
+    tenure: "تاريخ التعامل"
+  });
+
+  function smartResult(status, note, extra = {}) {
+    return { status, label: SMART_STATUS_LABELS[status], limitBase: null, limit: null, notes: note ? [note] : [], ...extra };
+  }
+
+  // النوافذ المغطاة بأوزانها المعاد توزيعها، والمتوسط الشهري المرجّح لقيمة منها.
+  function smartWeighted(windows, valueOf) {
+    const S = CONFIG.smartCredit;
+    const usable = windows.map((entry, index) => ({ entry, weight: S.windowWeights[index] })).filter(({ entry }) => entry.covered);
+    const total = usable.reduce((sum, { weight }) => sum + weight, 0);
+    if (!(total > 0)) return null;
+    return usable.reduce((sum, { entry, weight }) => sum + (valueOf(entry) / entry.days) * 30 * (weight / total), 0);
+  }
+
+  // درجات السلوك (0..1) — كل واحدة من بيانات الدفتر نفسها، لا تقدير.
+  function smartScores(smart, auto, balance, widest, thirty) {
+    const S = CONFIG.smartCredit;
+    const widestNet = widest.draw - widest.returns;
+    const regularity = smart.coveredBuckets > 0
+      ? (smart.paymentBuckets / smart.coveredBuckets) * (smart.gapCv === null ? 0.75 : 1 - Math.min(1, smart.gapCv) / 2)
+      : 0;
+    const onTime = auto.paymentBehaviour?.onTimeShare;
+    const punctuality = Number.isFinite(onTime) ? onTime : 0.5;
+    const coverageRatio = widestNet > 0 ? widest.payments / widestNet : null;
+    const coverage = coverageRatio === null ? 0 : clamp((coverageRatio - S.coverageFloor) / (1 - S.coverageFloor), 0, 1);
+    // تراكم الدين خلال النافذة الأوسع: نمو الرصيد ÷ سحبها. نافذة 90 غير مغطاة ⇒ محايد.
+    const growth = widest.days === S.windowsDays[S.windowsDays.length - 1] && widest.draw > 0
+      ? (Math.max(0, balance) - Math.max(0, smart.balanceAgo)) / widest.draw
+      : null;
+    const accumulation = growth === null ? 0.5 : 1 - clamp(growth / S.accumulationMaxShare, 0, 1);
+    // الاتجاه: صافي آخر 30 يوماً مقابل الثلاثين التي قبلها.
+    const priorNet = smart.windows[1]?.covered ? (smart.windows[1].draw - smart.windows[1].returns) - (thirty.draw - thirty.returns) : null;
+    const trendRatio = priorNet !== null && priorNet > 0 ? (thirty.draw - thirty.returns) / priorNet : null;
+    const trend = trendRatio === null ? 0.5 : clamp(0.5 + 0.5 * (trendRatio - 1), 0, 1);
+    const tenureDays = smart.tenureDays;
+    const tenure = clamp(tenureDays / S.tenureFullDays, 0, 1);
+    return {
+      scores: { regularity, punctuality, coverage, accumulation, trend, tenure },
+      measures: { coverageRatio, growth, trendRatio, tenureDays, onTimeShare: Number.isFinite(onTime) ? onTime : null }
+    };
+  }
+
+  // الحد الذكي لزبون واحد (عملة الأساس، قبل التنعيم والتقريب). auto: نتيجة computeAutoCredit نفسها
+  // (حالة التعثّر/الخمول/الدفع المسبق والدورة وانتظام الدفع) — لا حكم ثانٍ يناقضها.
+  function computeSmartCredit(facts, auto, stats, balance, referenceDay) {
+    const S = CONFIG.smartCredit;
+    if (!auto || auto.status === "unavailable" || !facts) return smartResult("unavailable", (auto?.notes || [])[0] || "لا دفتر حساب لهذا الزبون.");
+    if (auto.status === "non_customer") return smartResult("not_customer", (auto.notes || [])[0]);
+    if (auto.status === "needs_review") return smartResult("needs_review", (auto.notes || [])[0]);
+    if (auto.status === "delinquent") return { ...smartResult("delinquent", "متعثّر: دين متأخر لا تغطيه دفعات مدته، فالحد الذكي صفر فوراً."), limitBase: 0, limit: 0 };
+    if (auto.status === "inactive") return { ...smartResult("inactive", "لا سحب خلال 60 يوماً، فلا حد ذكي (وليس متعثّراً)."), limitBase: 0, limit: 0 };
+    if (auto.status === "prepaid") return smartResult("prepaid", "رصيده دائن ويدفع قبل أن يسحب: لا تعرّض ائتماني.");
+
+    const smart = { ...facts.smart };
+    smart.tenureDays = smart.firstActivityDay === null ? 0 : referenceDay - smart.firstActivityDay;
+    const windows = smart.windows;
+    const thirty = windows[0];
+    const widest = windows.filter((entry) => entry.covered).pop() || null;
+    const settled = (facts.settledSales || []).length;
+    const payments90 = widest ? widest.payments : 0;
+    const inputs = {
+      windows: windows.map((entry) => ({
+        days: entry.days,
+        covered: entry.covered,
+        draw: entry.covered ? round(entry.draw, 3) : null,
+        returns: entry.covered ? round(entry.returns, 3) : null,
+        net: entry.covered ? round(entry.draw - entry.returns, 3) : null,
+        payments: entry.covered ? round(entry.payments, 3) : null
+      })),
+      saleInvoices: facts.debitCount,
+      settledSales: settled,
+      paymentCount: smart.paymentCount,
+      tenureDays: smart.tenureDays,
+      averageBalance: round(smart.averageBalance, 3)
+    };
+    const missing = [];
+    if (!thirty.covered || !widest) missing.push("الدفتر لا يغطي آخر 30 يوماً");
+    if (facts.debitCount < S.minSaleInvoices) missing.push(`${facts.debitCount} فاتورة بيع فقط (المطلوب ≥ ${S.minSaleInvoices})`);
+    if (settled < S.minSettledSales) missing.push(`${settled} فاتورة مسددة فعلاً (المطلوب ≥ ${S.minSettledSales})`);
+    if (smart.paymentCount < S.minPayments90) missing.push(`${smart.paymentCount} دفعة خلال ${widest ? widest.days : 90} يوماً (المطلوب ≥ ${S.minPayments90})`);
+    if (smart.tenureDays < S.minTenureDays) missing.push(`عمر التعامل ${smart.tenureDays} يوماً (المطلوب ≥ ${S.minTenureDays})`);
+    if (missing.length) return smartResult("insufficient", `بيانات غير كافية لحد ذكي موثوق: ${missing.join("، ")}.`, { inputs });
+
+    const netMonthly = smartWeighted(windows, (entry) => entry.draw - entry.returns);
+    const paymentMonthly = smartWeighted(windows, (entry) => entry.payments);
+    if (!(netMonthly > 0)) return smartResult("insufficient", "صافي السحب بعد المرتجعات ليس موجباً: لا قدرة سداد تُقاس عليها.", { inputs });
+    const capacityMonthly = Math.min(paymentMonthly, S.drawHeadroom * netMonthly);
+    const widestNet = widest.draw - widest.returns;
+    const dsoDays = widestNet > 0 ? smart.averageBalance / (widestNet / widest.days) : null;
+    const cycleDays = Number.isFinite(auto.cycleDays) ? auto.cycleDays : null;
+    const horizonRaw = [dsoDays, cycleDays].filter((value) => Number.isFinite(value) && value >= 0);
+    if (!horizonRaw.length) return smartResult("insufficient", "لا دورة سداد ولا دوران ذمم يُقاس عليهما.", { inputs });
+    const { scores, measures } = smartScores(smart, auto, balance, widest, thirty);
+    // أجل أطول من وسيط المحفظة يُكتسب بالسداد الكامل في موعده: الزيادة فوق الوسيط × التغطية ×
+    // الالتزام. فمن يتأخر أو يدفع جزءاً لا يطول أفقه لأن دينه يتراكم (وإلا كافأ البطءُ نفسَه).
+    const horizonMeasured = clamp(Math.min(...horizonRaw), stats.floorDays, stats.capDays);
+    const earnedShare = scores.coverage * scores.punctuality;
+    const horizonDays = horizonMeasured > stats.medianDays
+      ? stats.medianDays + (horizonMeasured - stats.medianDays) * earnedShare
+      : horizonMeasured;
+    const core = (capacityMonthly / 30) * horizonDays;
+
+    const W = S.scoreWeights;
+    const score = Object.keys(W).reduce((sum, key) => sum + W[key] * scores[key], 0);
+    const multiplier = S.multiplierMin + S.multiplierSpan * score;
+    const returnsShare = widest.draw > 0 ? widest.returns / widest.draw : 0;
+    const returnsFactor = 1 - S.returnsMaxPenalty * clamp((returnsShare - S.returnsFreeShare) / (S.returnsMaxShare - S.returnsFreeShare), 0, 1);
+    const overdueShare = balance > 0 && Number.isFinite(auto.balanceSupportedOverdue) ? clamp(auto.balanceSupportedOverdue / balance, 0, 1) : 0;
+    const overdueFactor = 1 - S.overdueMaxPenalty * overdueShare;
+    const formula = core * multiplier * returnsFactor * overdueFactor;
+    const paymentCap = payments90;
+    const limitRaw = Math.max(0, Math.min(formula, paymentCap));
+    const notes = [];
+    if (formula > paymentCap) notes.push(`سقف القدرة: الحد لا يتجاوز ما دفعه فعلاً خلال ${widest.days} يوماً (${Math.round(paymentCap)}$).`);
+    if (paymentMonthly > S.drawHeadroom * netMonthly) notes.push("دفعاته أعلى من حاجته الشرائية (تسديد دين قديم غالباً)، فالقدرة محصورة بـ1.25× صافي سحبه.");
+    if (returnsFactor < 1) notes.push(`المرتجعات ${Math.round(returnsShare * 100)}% من السحب خفّضت الحد ${Math.round((1 - returnsFactor) * 100)}%.`);
+    if (horizonDays <= S.cashHorizonDays) notes.push(`يسدّد خلال ${Math.max(1, Math.round(horizonDays))} يوم تقريباً: حاجته الفعلية للآجل صغيرة، فالحد الذكي صغير وقد يُقرَّب إلى صفر.`);
+    if (overdueFactor < 1) notes.push(`دين متأخر يمثل ${Math.round(overdueShare * 100)}% من الرصيد خفّض الحد ${Math.round((1 - overdueFactor) * 100)}%.`);
+
+    return {
+      status: "normal",
+      label: SMART_STATUS_LABELS.normal,
+      limitBase: limitRaw,
+      limitRaw: round(limitRaw, 3),
+      limit: null,
+      notes,
+      inputs,
+      components: {
+        netDrawMonthly: round(netMonthly, 3),
+        paymentMonthly: round(paymentMonthly, 3),
+        capacityMonthly: round(capacityMonthly, 3),
+        dsoDays: roundOrNull(dsoDays, 2),
+        cycleDays: roundOrNull(cycleDays, 2),
+        horizonMeasuredDays: round(horizonMeasured, 2),
+        horizonEarnedShare: round(earnedShare, 4),
+        portfolioMedianDays: stats.medianDays,
+        horizonDays: round(horizonDays, 2),
+        core: round(core, 3),
+        score: round(score, 4),
+        multiplier: round(multiplier, 4),
+        returnsShare: round(returnsShare, 4),
+        returnsFactor: round(returnsFactor, 4),
+        overdueShare: round(overdueShare, 4),
+        overdueFactor: round(overdueFactor, 4),
+        formula: round(formula, 3),
+        paymentCap: round(paymentCap, 3)
+      },
+      scores: Object.fromEntries(Object.entries(scores).map(([key, value]) => [key, round(value, 4)])),
+      measures: Object.fromEntries(Object.entries(measures).map(([key, value]) => [key, roundOrNull(value, 4)]))
+    };
+  }
+
+  // آخر حد ذكي رقمي من اللقطات السابقة (factors.smart) — الأحدث أولاً.
+  function previousSmartSnapshot(history) {
+    for (const row of history || []) {
+      const smart = row.factors?.smart;
+      if (smart && typeof smart === "object" && SMART_STATUS_LABELS[smart.status]) return { date: row.date, ...smart };
+    }
+    return null;
+  }
+
+  // التنعيم اليومي: لا قفزات حادة. +10% / −20% من آخر لقطة سابقة، وتغيّر أقل من 5% لا يحرّك الحد.
+  // التعثّر والخمول يصفّران فوراً (لا يمرّان هنا). أساس بلا رقم موجب ⇒ الحد المحسوب كما هو.
+  function smoothSmartCredit(smart, previous) {
+    if (!smart || smart.status !== "normal") return;
+    const S = CONFIG.smartCredit;
+    const raw = smart.limitBase;
+    if (!previous || previous.status !== "normal" || !(previous.limitBase > 0)) {
+      smart.smoothing = { applied: false, reason: previous ? "no_numeric_baseline" : "no_history", baselineDate: previous?.date ?? null };
+      return;
+    }
+    const base = previous.limitBase;
+    const change = (raw - base) / base;
+    let limited = raw;
+    let reason = "within_bounds";
+    if (Math.abs(change) < S.deadband) { limited = base; reason = "deadband"; }
+    else if (change > S.maxDailyIncrease) { limited = base * (1 + S.maxDailyIncrease); reason = "capped_increase"; }
+    else if (change < -S.maxDailyDecrease) { limited = base * (1 - S.maxDailyDecrease); reason = "capped_decrease"; }
+    smart.limitBase = limited;
+    smart.smoothing = { applied: limited !== raw, reason, baselineDate: previous.date, baselineLimitBase: round(base, 3), rawChange: round(change, 4) };
+  }
+
+  // سبب الزيادة أو التخفيض عن آخر لقطة: أكبر تغيّر في الدرجات أو في القدرة/الأفق، بالأرقام.
+  function smartChangeOf(smart, previous) {
+    if (!previous || !SMART_NUMERIC_STATUSES.has(smart.status) || !Number.isFinite(previous.limit) || previous.limit === smart.limit) {
+      if (previous && previous.status !== smart.status) {
+        return { direction: null, previousDate: previous.date, previousLimit: previous.limit ?? null, text: `تغيّرت الحالة من «${SMART_STATUS_LABELS[previous.status]}» إلى «${SMART_STATUS_LABELS[smart.status]}».` };
+      }
+      return previous ? { direction: "flat", previousDate: previous.date, previousLimit: previous.limit ?? null, text: "لا تغيير عن آخر لقطة." } : null;
+    }
+    const up = smart.limit > previous.limit;
+    const reasons = [];
+    if (smart.status === "delinquent") reasons.push("صار متعثّراً");
+    else if (smart.status === "inactive") reasons.push("توقف عن السحب");
+    else {
+      const P = previous.scores || {};
+      const C = smart.scores || {};
+      const moved = Object.keys(SMART_FACTOR_LABELS)
+        .filter((key) => Number.isFinite(P[key]) && Number.isFinite(C[key]) && Math.sign(C[key] - P[key]) === (up ? 1 : -1))
+        .sort((a, b) => Math.abs(C[b] - P[b]) - Math.abs(C[a] - P[a]))
+        .slice(0, 2);
+      moved.forEach((key) => reasons.push(`${up ? "تحسّن" : "تراجع"} ${SMART_FACTOR_LABELS[key]} (${Math.round(P[key] * 100)}% ← ${Math.round(C[key] * 100)}%)`));
+      const capPrev = previous.capacityMonthly;
+      const capNow = smart.components?.capacityMonthly;
+      if (Number.isFinite(capPrev) && Number.isFinite(capNow) && capPrev > 0 && Math.sign(capNow - capPrev) === (up ? 1 : -1) && Math.abs(capNow - capPrev) / capPrev >= 0.05) {
+        reasons.push(`القدرة الشهرية على السداد صارت ${Math.round(capNow)}$ بدل ${Math.round(capPrev)}$`);
+      }
+      if (!reasons.length) reasons.push(smart.smoothing?.applied ? "التنعيم اليومي يقرّبه تدريجياً من الحد المحسوب" : "تغيّر مجمل في مكوّنات الحساب");
+    }
+    return {
+      direction: up ? "up" : "down",
+      previousDate: previous.date,
+      previousLimit: previous.limit,
+      text: `${up ? "ارتفع" : "انخفض"} الحد الذكي من ${previous.limit.toLocaleString("en-US")}$ إلى ${smart.limit.toLocaleString("en-US")}$ لأن ${reasons.join("، و")}.`
+    };
+  }
+
+  // الحد الذكي النهائي للعرض: تنعيم، تقريب تجاري بالدولار، تفسير التغيير، وتاريخ التحديث.
+  function finalizeSmartCredit(smart, history, meta) {
+    const previous = previousSmartSnapshot(history);
+    smoothSmartCredit(smart, previous);
+    if (Number.isFinite(smart.limitBase)) smart.limit = commercialRound(smart.limitBase, CONFIG.baseCurrency);
+    smart.currency = CONFIG.baseCurrency;
+    smart.previous = previous ? { date: previous.date, status: previous.status, limit: previous.limit ?? null } : null;
+    smart.change = smartChangeOf(smart, previous);
+    smart.updatedAt = meta.referenceDate;
+    smart.computedAt = meta.generatedAt;
+    smart.dataAsOf = meta.dataAsOf;
+    smart.factors = smart.scores ? Object.keys(SMART_FACTOR_LABELS).map((key) => ({
+      key,
+      label: SMART_FACTOR_LABELS[key],
+      score: smart.scores[key],
+      effect: smart.scores[key] >= 0.7 ? "up" : smart.scores[key] <= 0.4 ? "down" : "neutral"
+    })) : [];
+    return smart;
+  }
+
+  // بوابة البيانات: فجوة مصدر (رصيد/فواتير/حركات غير حديثة، يومان محاسبيان، بلا مصدر موسوم، بلا
+  // سعر صرف، رصيد مجهول) ⇒ «غير متاح» بلا رقم — البوابات نفسها التي تُغلق الحد المقترح.
+  function smartCreditGate(smart, auto, credit) {
+    if (HISTORY_GAP_CREDIT_STATUSES.has(credit.proposedCreditStatus ?? credit.creditStatus)) {
+      return smartResult("unavailable", "مصادر البيانات غير حديثة أو غير مكتملة الآن، فلا حد ذكي حتى تتحدّث المزامنة.");
+    }
+    if (smart) return smart;
+    if (auto?.status === "non_customer") return smartResult("not_customer", (auto.notes || [])[0]);
+    if (auto?.status === "needs_review") return smartResult("needs_review", (auto.notes || [])[0]);
+    return smartResult("unavailable", (auto?.notes || [])[0] || "لا دفتر حساب لهذا الزبون.");
+  }
+
+  // ما تحفظه اللقطة اليومية من الحد الذكي (داخل factors، بلا عمود جديد).
+  function smartSnapshotOf(smart) {
+    if (!smart || !SMART_STATUS_LABELS[smart.status]) return null;
+    return {
+      status: smart.status,
+      limit: Number.isFinite(smart.limit) ? smart.limit : null,
+      limitBase: Number.isFinite(smart.limitBase) ? round(smart.limitBase, 3) : null,
+      limitRaw: Number.isFinite(smart.limitRaw) ? smart.limitRaw : null,
+      capacityMonthly: smart.components?.capacityMonthly ?? null,
+      horizonDays: smart.components?.horizonDays ?? null,
+      multiplier: smart.components?.multiplier ?? null,
+      scores: smart.scores || null
+    };
+  }
+
 
   // --------------------------------------------------------------------------
   // الائتمان: الحد الآلي هو المصدر الوحيد. حد الأمين احتياط فقط حين يتعذّر
@@ -2016,7 +2395,7 @@
         coverage: snapshot.factors.coverage,
         punctuality: snapshot.factors.punctuality,
         risk_score: row.riskScore,
-        factors: snapshot.factors,
+        factors: { ...snapshot.factors, smart: smartSnapshotOf(row.smartCredit) },
         engine_schema_version: SCHEMA_VERSION,
         computed_at: result.generatedAt
       };
@@ -2368,6 +2747,7 @@
       const isSupplierRecord = isSupplierAccount(record.customerGuid, record.balanceRow?.isSupplier);
       const display = accountDisplay(record.balanceRow, record.customerGuid);
       let auto = null;
+      let smartCredit = null;
       // قائمتا المالك (بالمعرّف) لا تحتاجان بيانات حديثة، فتسبقان مسار المصدر القديم:
       // لا يظهر حد الأمين بديلاً لحساب مستبعد أو مختلط عند توقف المزامنة.
       const ownerListed = excludedGuids.has(record.customerGuid) || reviewGuids.has(record.customerGuid)
@@ -2425,6 +2805,8 @@
         // التنعيم الأسبوعي ثم السقف الاحترازي قيداً نهائياً، قبل حكم الاستخدام/التجاوز.
         if (historyIndex) smoothAutoCredit(auto, historyIndex.get(record.customerGuid), window.referenceDay);
         applyPrecautionaryCap(auto);
+        // الحد الذكي: حساب مستقل من الدفتر نفسه وحالة auto نفسها — لا يمسّ auto ولا الحد المقترح.
+        smartCredit = computeSmartCredit(facts, auto, cycleStats, unifiedBalance, window.referenceDay);
       }
       const credit = resolveCredit(record.balanceRow, auto, display, legacyCreditLimit, {
         balancesStale: sourcesFreshness.balances.stale,
@@ -2445,6 +2827,7 @@
         credit.overLimitAmount = null;
       }
       attachApprovedCredit(credit, record.balanceRow, approvedEntry, display);
+      credit.smartCredit = isSupplierRecord ? null : smartCreditGate(smartCredit, auto, credit);
 
       // أصناف مختلطة العملة: لا نجمع lineTotals بعملات مختلفة — نُعيد صفر أصناف.
       const items = currencyMixed ? { items: [], identity: "item_guid" } : topItems(windowRows);
@@ -2574,6 +2957,8 @@
     const declineFloor = baseCohort.declineFloor;
 
     // ── التصنيف النهائي ──────────────────────────────────────────────────────
+    // تاريخ آخر تحديث للحد الذكي: يوم المرجع (لقطة البيانات) ووقت الحساب ووقت مزامنة الدفتر.
+    const smartMeta = { referenceDate: window.referenceDate || null, generatedAt: now.toISOString(), dataAsOf: sourcesFreshness.movements?.asOf ?? null };
     const customers = drafts.map((draft) => {
       const composite = compositeByRecord.get(draft.record.recordKey) || null;
       const flags = [];
@@ -2819,6 +3204,9 @@
         approvedCredit: draft.credit.approvedCredit,
         ameenCreditLimit: draft.credit.ameenCreditLimit,
         exchangeRate: draft.credit.exchangeRate,
+        smartCredit: draft.credit.smartCredit
+          ? finalizeSmartCredit(draft.credit.smartCredit, historyIndex ? historyIndex.get(draft.record.customerGuid) || [] : null, smartMeta)
+          : null,
 
         topItems: draft.items.items,
         topItemsIdentity: draft.items.identity,
