@@ -50,6 +50,12 @@ function Read-CashierReprintConfig([string]$Path) {
         agentPickupSeconds = 20
         agentResultTimeoutSeconds = 150
         agentHeartbeatMaxAgeSeconds = 30
+        # أرشيف الإيصالات الثابت الذي يكتبه الجسر (قراءة فقط هنا). فارغ = المسار الافتراضي.
+        receiptArchiveRoot = ""
+        # true فقط بعد ترقية الجسر إلى نسخة تقبل -ExpectedInvoiceGuid؛ الجسر القديم يرفض الوسيط المجهول.
+        bridgePinsInvoiceGuid = $false
+        # طريقة تسليم الإيصال للطابعة: raw (الافتراضي، ESC/POS مباشرة كما كان) أو driver (عبر تعريف Windows).
+        printTransport = "raw"
     }
     foreach ($name in @("bridgeTimeoutSeconds", "recentReprintWarningSeconds", "newInvoiceWarningSeconds", "jobWatchSeconds", "remotePort", "remoteTimeoutSeconds",
             "agentPickupSeconds", "agentResultTimeoutSeconds", "agentHeartbeatMaxAgeSeconds")) {
@@ -57,6 +63,14 @@ function Read-CashierReprintConfig([string]$Path) {
     }
     foreach ($name in @("remoteHost", "remoteUser", "remoteKeyPath", "remoteKnownHostsPath", "remoteExpectedHostName")) {
         if ($null -ne $raw.PSObject.Properties[$name]) { $config[$name] = [Environment]::ExpandEnvironmentVariables([string]$raw.$name) }
+    }
+    if ($null -ne $raw.PSObject.Properties["receiptArchiveRoot"]) { $config.receiptArchiveRoot = [Environment]::ExpandEnvironmentVariables([string]$raw.receiptArchiveRoot) }
+    if ([string]::IsNullOrWhiteSpace($config.receiptArchiveRoot)) {
+        $config.receiptArchiveRoot = Join-Path ([Environment]::GetFolderPath("CommonApplicationData")) "OZK-TOBACCO\ReceiptArchive"
+    }
+    if ($null -ne $raw.PSObject.Properties["bridgePinsInvoiceGuid"]) {
+        if ($raw.bridgePinsInvoiceGuid -isnot [bool]) { throw "الإعداد bridgePinsInvoiceGuid يجب أن يكون true أو false." }
+        $config.bridgePinsInvoiceGuid = [bool]$raw.bridgePinsInvoiceGuid
     }
     if ($null -ne $raw.PSObject.Properties["bridgeSqlSource"]) { $config.bridgeSqlSource = ([string]$raw.bridgeSqlSource).Trim().ToLowerInvariant() }
     if ($config.bridgeSqlSource -ne "user-env" -and $config.bridgeSqlSource -ne "tool-secret") {
@@ -86,6 +100,13 @@ function Read-CashierReprintConfig([string]$Path) {
         if ($config.agentResultTimeoutSeconds -lt ($config.agentPickupSeconds + $config.bridgeTimeoutSeconds + $config.jobWatchSeconds)) {
             throw "agentResultTimeoutSeconds يجب ألا يقل عن agentPickupSeconds + bridgeTimeoutSeconds + jobWatchSeconds."
         }
+    }
+    if ($null -ne $raw.PSObject.Properties["printTransport"]) { $config.printTransport = ([string]$raw.printTransport).Trim().ToLowerInvariant() }
+    if ($config.printTransport -ne "raw" -and $config.printTransport -ne "driver") { throw "الإعداد printTransport يجب أن يكون raw أو driver." }
+    if ($config.printTransport -eq "driver") {
+        if ($mode -ne "local") { throw "printTransport=driver يُضبط على جهاز الطابعة فقط (mode=local)." }
+        # بلا بصمة رسّام مثبّتة قد يُشغَّل رسّام قديم يتجاهل الطلب ويطبع RAW بصمت.
+        if ($config.expectedRendererSha256 -eq "") { throw "printTransport=driver يتطلب expectedRendererSha256 (رسّام مثبّت يدعم مسار التعريف)." }
     }
     if ($config.printerName -cne $script:CashierPrinterName) {
         throw "طابعة الكاشير الوحيدة المسموحة هي '$($script:CashierPrinterName)'."
@@ -139,6 +160,10 @@ select top (50)
     u.IsPosted as is_posted,
     coalesce(u.RecState, 0) as record_state,
     u.Total as total,
+    u.TotalDisc as total_discount,
+    u.TotalExtra as total_extra,
+    u.CurrencyVal as currency_value,
+    u.LastUpdateDate as last_update_date,
     u.Cust_Name as customer_name
 from dbo.bu000 u
 join dbo.bt000 bt on bt.GUID = u.TypeGUID
@@ -220,6 +245,11 @@ function Invoke-CashierInvoiceLookup($Connection, [int]$Number) {
             if (-not ($reader["total"] -is [DBNull])) { $total = [double]$reader["total"] }
             $created = $null
             if (-not ($reader["create_date"] -is [DBNull])) { $created = [datetime]$reader["create_date"] }
+            $optional = @{}
+            foreach ($column in @("total_discount", "total_extra", "currency_value")) {
+                $optional[$column] = $null
+                if (-not ($reader[$column] -is [DBNull])) { $optional[$column] = [double]$reader[$column] }
+            }
             $rows.Add([pscustomobject]@{
                 InvoiceGuid = ([string]$reader["invoice_guid"]).ToLowerInvariant()
                 InvoiceNumber = [int]$reader["invoice_number"]
@@ -231,6 +261,9 @@ function Invoke-CashierInvoiceLookup($Connection, [int]$Number) {
                 IsPosted = [bool]$reader["is_posted"]
                 RecordState = [int]$reader["record_state"]
                 Total = $total
+                TotalDiscount = $optional["total_discount"]
+                TotalExtra = $optional["total_extra"]
+                CurrencyValue = $optional["currency_value"]
                 CustomerName = [string]$reader["customer_name"]
             })
         }
@@ -291,6 +324,94 @@ function Resolve-CashierInvoice($Rows, [int]$Number, [string]$Date = "") {
 }
 
 # ── بصمة الجسر المثبّت ────────────────────────────────────────────────────────
+# ── أرشيف الإيصالات (قراءة فقط) ───────────────────────────────────────────────
+# يكتبه الجسر (OzkReceiptArchive.psm1). هنا قراءة سجل المراحل ونسخة الإيصال وحدها، بلا كتابة.
+# المفتاح GUID الفاتورة: الأمين يعيد استخدام الرقم بعد الحذف، فالرقم وحده لا يميّز.
+function Read-CashierArchivePrints([string]$ArchiveRoot) {
+    $byId = @{}
+    if ([string]::IsNullOrWhiteSpace($ArchiveRoot) -or -not (Test-Path -LiteralPath $ArchiveRoot -PathType Container)) { return @() }
+    foreach ($file in @(Get-ChildItem -LiteralPath $ArchiveRoot -Filter "events-*.jsonl" -File | Sort-Object Name)) {
+        foreach ($line in [IO.File]::ReadAllLines($file.FullName, [Text.Encoding]::ASCII)) {
+            if ($line.Trim().Length -eq 0) { continue }
+            try { $archiveEvent = $line | ConvertFrom-Json } catch { continue }
+            $id = [string]$archiveEvent.printId
+            if (-not $byId.ContainsKey($id)) {
+                $byId[$id] = [pscustomobject]@{ PrintId = $id; InvoiceGuid = ""; InvoiceNumber = 0; PreparedAt = $null; PrintedNet = $null
+                    ReceiptPath = ""; ContentSha256 = ""; Source = ""; Stages = @() }
+            }
+            $entry = $byId[$id]
+            if ([string]$archiveEvent.stage -eq "prepared") {
+                $entry.InvoiceGuid = ([string]$archiveEvent.invoiceGuid).ToLowerInvariant(); $entry.InvoiceNumber = [int]$archiveEvent.invoiceNumber
+                $entry.PreparedAt = $(if ($archiveEvent.at -is [datetime]) { $archiveEvent.at.ToUniversalTime().ToString("o") } else { [string]$archiveEvent.at }); $entry.PrintedNet = $archiveEvent.printedNet; $entry.ReceiptPath = [string]$archiveEvent.receiptPath
+                $entry.ContentSha256 = [string]$archiveEvent.contentSha256; $entry.Source = [string]$archiveEvent.source
+            }
+            $entry.Stages = @($entry.Stages) + [string]$archiveEvent.stage
+        }
+    }
+    return @($byId.Values | Where-Object { $_.InvoiceGuid } | ForEach-Object {
+        $stages = @($_.Stages)
+        $_ | Add-Member -NotePropertyName ReachedSpooler -NotePropertyValue ([bool](($stages -contains "submitted") -or ($stages -contains "submit_uncertain") -or ($stages -contains "windows_completed") -or ($stages -contains "windows_error") -or ($stages -contains "paper_confirmed"))) -PassThru
+    } | Sort-Object { [string]$_.PreparedAt })
+}
+
+function Read-CashierArchivedReceipt([string]$ArchiveRoot, $Print) {
+    $path = Join-Path $ArchiveRoot ([string]$Print.ReceiptPath)
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "نسخة الإيصال المؤرشفة غير موجودة." }
+    if ((Get-CashierFileSha256 $path) -ne ([string]$Print.ContentSha256).ToLowerInvariant()) { throw "نسخة الإيصال المؤرشفة فشلت فحص البصمة SHA-256." }
+    return ([IO.File]::ReadAllText($path, [Text.Encoding]::ASCII) | ConvertFrom-Json)
+}
+
+function Test-CashierNumberDiffers($A, $B) {
+    if ($null -eq $A -and $null -eq $B) { return $false }
+    if ($null -eq $A -or $null -eq $B) { return $true }
+    $scale = [math]::Max(1e-12, [math]::Max([math]::Abs([double]$A), [math]::Abs([double]$B)))
+    return ([math]::Abs([double]$A - [double]$B) / $scale -gt 1e-9)
+}
+
+# هل تغيّرت الفاتورة الحالية عمّا طُبع آخر مرة؟ ومن طُبع بهذا الرقم قبلها لفاتورة أخرى؟
+function Get-CashierArchiveInsight([string]$ArchiveRoot, $Invoice, [object[]]$Prints = $null) {
+    if ($null -eq $Prints) { $Prints = @(Read-CashierArchivePrints $ArchiveRoot) }
+    $guid = ([string]$Invoice.InvoiceGuid).ToLowerInvariant()
+    $own = @($Prints | Where-Object { $_.ReachedSpooler -and $_.InvoiceGuid -eq $guid })
+    $others = @($Prints | Where-Object { $_.ReachedSpooler -and $_.InvoiceNumber -eq [int]$Invoice.InvoiceNumber -and $_.InvoiceGuid -ne $guid })
+    $insight = [ordered]@{
+        PriorPrints = $own.Count; LastPrintedAt = $null; LastPrintedNet = $null; ChangedSincePrint = $null; ArchiveIntegrityFailed = $false
+        NumberReusedFrom = @($others | ForEach-Object { [ordered]@{ PrintedAt = [string]$_.PreparedAt; InvoiceGuidSuffix = $_.InvoiceGuid.Substring($_.InvoiceGuid.Length - 8); PrintedNet = $_.PrintedNet } })
+    }
+    if ($own.Count) {
+        $last = $own[$own.Count - 1]
+        $insight.LastPrintedAt = [string]$last.PreparedAt
+        $insight.LastPrintedNet = $last.PrintedNet
+        try {
+            $content = Read-CashierArchivedReceipt $ArchiveRoot $last
+            $insight.ChangedSincePrint = (Test-CashierNumberDiffers $content.invoice.total $Invoice.Total) -or
+                (Test-CashierNumberDiffers $content.invoice.totalDiscount $Invoice.TotalDiscount) -or
+                (Test-CashierNumberDiffers $content.invoice.totalExtra $Invoice.TotalExtra) -or
+                (Test-CashierNumberDiffers $content.invoice.currencyValue $Invoice.CurrencyValue)
+        } catch {
+            $insight.ArchiveIntegrityFailed = $true
+        }
+    }
+    return [pscustomobject]$insight
+}
+
+# نسخة تاريخية نصية موسومة بوضوح للعرض فقط — لا تُرسل إلى الطابعة أبداً ولا تحمل اسم الزبون.
+function Format-CashierHistoricalReceipt($Content, $Print) {
+    $iso = [string]$Content.invoice.currencyIso
+    $f = { param($v) if ($null -eq $v) { "-" } else { ([double]$v).ToString("#,##0.00", [Globalization.CultureInfo]::InvariantCulture) } }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("==== نسخة تاريخية — لا تمثّل الفاتورة الحالية ====")
+    $lines.Add("طُبعت أصلاً: $($Print.PreparedAt)   المصدر: $($Print.Source)")
+    $lines.Add("فاتورة كاشير رقم $($Content.invoice.number)   GUID …$(([string]$Content.invoice.guid).Substring(28))")
+    $lines.Add("سعر الصرف المطبوع: $(& $f $Content.invoice.ratePerBase)")
+    foreach ($l in @($Content.lines)) { $lines.Add("- $($l.itemName)   $(& $f $l.printedQuantity) × $(& $f $l.printedUnitPrice) = $(& $f $l.printedTotal)") }
+    $lines.Add("الإجمالي: $(& $f $Content.printed.gross)   الخصومات: $(& $f $Content.printed.discount)   الإضافات: $(& $f $Content.printed.extra)")
+    $lines.Add("صافي الفاتورة: $(& $f $Content.printed.net) $iso")
+    $lines.Add("بصمة النسخة SHA-256: $($Print.ContentSha256)")
+    $lines.Add("==== نسخة تاريخية — للعرض فقط، لا تُطبع على أنها الفاتورة الحالية ====")
+    return ($lines -join "`n")
+}
+
 function Get-CashierFileSha256([string]$Path) {
     $stream = [IO.File]::OpenRead($Path)
     try {
@@ -326,6 +447,23 @@ function Assert-CashierRendererPinned($Config) {
         throw "نسخة رسم الإيصال على هذا الجهاز تغيّرت (البصمة $($actual.Substring(0,12))…) ولم تُعتمد لإعادة الطباعة. لن تُطبع أي فاتورة."
     }
     return $actual
+}
+
+# مسار التعريف يحتاج رسّاماً يقرأ OZK_RECEIPT_TRANSPORT؛ الرسّام القديم يتجاهله ويطبع RAW. الفحص قبل أي طباعة.
+$script:CashierTransportMarker = '$env:OZK_RECEIPT_TRANSPORT'
+function Assert-CashierRendererSupportsTransport($Config) {
+    if ($Config.printTransport -ne "driver") { return }
+    $path = Get-CashierRendererPath $Config
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "ملف رسم الإيصال للجسر غير موجود على هذا الجهاز: $path" }
+    if ([IO.File]::ReadAllText($path).IndexOf($script:CashierTransportMarker, [StringComparison]::Ordinal) -lt 0) {
+        throw "الإعداد printTransport=driver لكن رسّام الإيصال على هذا الجهاز لا يدعم الطباعة عبر التعريف. لن تُطبع أي فاتورة."
+    }
+}
+
+# ما نفّذه الجسر فعلاً: الرسّام يطبع سطر «OzkReceiptTransport: driver» بعد نجاح مسار التعريف وحده.
+function Get-CashierBridgeTransport([string]$Output) {
+    if ([regex]::IsMatch([string]$Output, '(?m)^\s*OzkReceiptTransport:\s*driver\b')) { return "driver" }
+    return "raw"
 }
 
 # ── الملفات التي تُنفَّذ: لا كتابة عليها لغير المدراء والنظام وصاحب التشغيل ────────
@@ -402,6 +540,7 @@ function Assert-CashierProtectedPaths($Config, [string]$Root, [scriptblock]$GetA
 function Assert-CashierBridgeReady($Config, [string]$Root) {
     $hash = Assert-CashierBridgePinned $Config
     [void](Assert-CashierRendererPinned $Config)
+    Assert-CashierRendererSupportsTransport $Config
     if ($Config.enforceProtectedPaths) { Assert-CashierProtectedPaths $Config $Root }
     return $hash
 }
@@ -485,6 +624,8 @@ $script:CashierPreSpoolErrorPatterns = @(
     "Missing required environment variable", "refuses database", "requires a db_datareader", "refuses a SQL principal",
     "Printer queue not found", "Printer queue not ready", "OpenPrinter failed", "StartDocPrinter failed", "Cashier receipts are restricted",
     "Receipt logo not found", "must be exactly 576 dots", "requires -ConfirmPhysicalPrint",
+    "Receipt transport not recognised", "Driver paper not found", "DeviceCapabilities failed", "DocumentProperties failed",
+    "CreateDC failed", "Driver page refused", "StartDoc failed",
     "network-related", "Login failed", "Cannot open database", "Connection Timeout Expired", "server was not found",
     "transport-level error", "A connection was successfully established"
 )
@@ -509,7 +650,7 @@ function Get-CashierBridgeOutcome([int]$ExitCode, [string]$Output, [bool]$TimedO
 # SqlConnectionString غير فارغ ⇒ يُمرَّر للجسر متغيّر Process اسمه AMEEN_SQL_CONNECTION_STRING للعملية
 # الفرعية وحدها (لا يُكتب على القرص ولا في الوسائط). الجسر يقدّم متغيّر User إن وُجد، فلا يتغيّر
 # سلوك حساب له متغيّره الخاص. فارغ ⇒ لا تغيير إطلاقاً عن السلوك السابق.
-function New-CashierBridgeStartInfo($Config, [int]$Number, [string]$Date, [string]$SqlConnectionString = "") {
+function New-CashierBridgeStartInfo($Config, [int]$Number, [string]$Date, [string]$SqlConnectionString = "", [string]$InvoiceGuid = "") {
     $powershellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
     $arguments = @(
         "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -521,6 +662,10 @@ function New-CashierBridgeStartInfo($Config, [int]$Number, [string]$Date, [strin
         "-PrinterName", ('"{0}"' -f $script:CashierPrinterName),
         "-ConfirmPhysicalPrint"
     )
+    # تثبيت GUID الفاتورة المحسومة: إن صار الرقم لفاتورة أخرى بين الحسم والطباعة يرفض الجسر.
+    if ($Config.PSObject.Properties["bridgePinsInvoiceGuid"] -and [bool]$Config.bridgePinsInvoiceGuid -and $InvoiceGuid) {
+        $arguments += @("-ExpectedInvoiceGuid", ([guid]$InvoiceGuid).ToString())
+    }
     $info = New-Object Diagnostics.ProcessStartInfo
     $info.FileName = $powershellPath
     $info.Arguments = ($arguments -join " ")
@@ -529,11 +674,16 @@ function New-CashierBridgeStartInfo($Config, [int]$Number, [string]$Date, [strin
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     if (-not [string]::IsNullOrEmpty($SqlConnectionString)) { $info.EnvironmentVariables["AMEEN_SQL_CONNECTION_STRING"] = $SqlConnectionString }
+    # مسار الطباعة للعملية الفرعية وحدها. raw ⇒ يُزال أي متغيّر موروث فيبقى الجسر على سلوكه السابق حرفياً.
+    $transport = "raw"
+    if ($Config.PSObject.Properties["printTransport"]) { $transport = [string]$Config.printTransport }
+    if ($transport -eq "driver") { $info.EnvironmentVariables["OZK_RECEIPT_TRANSPORT"] = "driver" }
+    elseif ($info.EnvironmentVariables.ContainsKey("OZK_RECEIPT_TRANSPORT")) { $info.EnvironmentVariables.Remove("OZK_RECEIPT_TRANSPORT") }
     return $info
 }
 
-function Invoke-CashierBridgeProcess($Config, [int]$Number, [string]$Date, [string]$SqlConnectionString = "") {
-    $info = New-CashierBridgeStartInfo $Config $Number $Date $SqlConnectionString
+function Invoke-CashierBridgeProcess($Config, [int]$Number, [string]$Date, [string]$SqlConnectionString = "", [string]$InvoiceGuid = "") {
+    $info = New-CashierBridgeStartInfo $Config $Number $Date $SqlConnectionString $InvoiceGuid
     $process = [Diagnostics.Process]::Start($info)
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -729,11 +879,16 @@ function Invoke-CashierReprint {
         return (Complete "busy" "هذه الفاتورة قيد الطباعة الآن من طلب آخر. انتظر انتهاءه." $null)
     }
     try {
-        $run = & $Runner $Config $Number $invoice.InvoiceDate $bridgeSqlText
+        $run = & $Runner $Config $Number $invoice.InvoiceDate $bridgeSqlText $invoice.InvoiceGuid
         $outcome = Get-CashierBridgeOutcome $run.ExitCode $run.Output $run.TimedOut
         $extra = @{ bridgeSha256 = $bridgeHash; exitCode = $run.ExitCode; reason = $outcome.Reason; printer = $script:CashierPrinterName }
+        $requestedTransport = "raw"
+        if ($Config.PSObject.Properties["printTransport"]) { $requestedTransport = [string]$Config.printTransport }
+        $extra.transport = $requestedTransport
         if ($outcome.Outcome -eq "printed") {
             $extra.jobId = $outcome.JobId
+            # المهمة أُرسلت فعلاً؛ لا إعادة إرسال مهما كان. عدم تطابق المسار يُسجَّل ويُعرض فقط.
+            if ($requestedTransport -eq "driver") { $extra.transportVerified = ((Get-CashierBridgeTransport $run.Output) -eq "driver") }
             $confirmation = [string](& $JobWatcher $Config $outcome.JobId)
             $extra.confirmation = $confirmation
             $head = "أُرسلت الفاتورة رقم $Number ($($invoice.InvoiceDate)) إلى طابعة الكاشير على $($env:COMPUTERNAME)."
@@ -742,6 +897,9 @@ function Invoke-CashierReprint {
                 "printer_error" { $tail = "لكن الطابعة أبلغت عن خطأ (ورق أو غطاء أو اتصال). افحصها قبل أي محاولة جديدة." }
                 "queued" { $tail = "ما زالت في طابور الطابعة؛ قد تتأخر. لا تُعد الطلب قبل فحص الطابعة." }
                 default { $tail = "تعذّر التحقق من طابور الطابعة؛ تأكد من خروج الورقة." }
+            }
+            if ($extra.ContainsKey("transportVerified") -and -not $extra.transportVerified) {
+                $tail += " تنبيه: لم يؤكّد الجسر أن الطباعة جرت عبر تعريف Windows كما هو مضبوط؛ راجع المسؤول."
             }
             return (Complete "sent" "$head $tail" $extra)
         }

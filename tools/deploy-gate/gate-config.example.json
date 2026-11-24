@@ -3,6 +3,8 @@
   "expectedHost": "OZK2026",
   "repoPath": "C:\\Users\\LOQ\\Documents\\OZK-TOBACCO\\tobacco-web",
   "gateDir": "C:\\ProgramData\\OZK-TOBACCO\\DeployGate",
+  "_launcherLogDir": "2026-10-31 (batch D0): run-repo-task.ps1 runs as the task accounts (LOQ, OZKSync), which only have read/execute on gateDir, so it could never write gateDir\\launcher.log. Its log now goes to this separate directory as launcher-YYYY-MM.log (rotation by name: no delete or rename right is needed). Provision it once as Administrator with tools/deploy-gate/set-launcher-log-acl.ps1: SYSTEM/Administrators full control; the task accounts may create and append files there and nothing else (no delete, no permission or owner change); gateDir ACL is unchanged. Must not be gateDir or inside it. When the key is absent the launcher keeps the old gateDir\\launcher.log path.",
+  "launcherLogDir": "C:\\ProgramData\\OZK-TOBACCO\\logs\\run-repo-task",
   "githubRepo": "ozkkhallouf-ux/tobacco-web",
   "windowsBranch": "windows-production",
   "mainBranch": "main",
@@ -35,6 +37,7 @@
   "startGuardSeconds": 120,
   "_startGuardSeconds": "Gap e: a task that is not routed through run-repo-task.ps1 does not honour deploying.flag, so the gate refuses to switch files when such a task is due to start within this many seconds (no race between the idle check and the merge).",
   "_pauseTasks": "The gate waits until none of these is Running (and refuses if any is not visible to its account: run the gate as SYSTEM). Gap c: the two backup tasks run pinned code from ProgramData but pass the repository's tools/send-telegram-notification.ps1 as -NotifyScript, so a deploy must not swap that file under them.",
+  "_pauseTasksInvoiceMonitor": "2026-10-31 (batch D0): TOBACCO Ameen Invoice Agent Monitor (LOQ/S4U, every 5 min) runs tools/ameen-invoice-agent-monitor.ps1 and passes tools/send-telegram-notification.ps1 as -NotifyScript, so the gate must wait for it to be idle. It is NOT routing-exempt: until its action goes through run-repo-task.ps1 (a later, separately approved batch) -Mode Deploy stops on it like any other unrouted pauseTask.",
   "pauseTasks": [
     "TOBACCO Ameen Sync",
     "TOBACCO Customer Movements Push",
@@ -53,7 +56,8 @@
     "TOBACCO Sync Watchdog",
     "OZK Ameen Full Backup",
     "OZK Ameen Verified Backup",
-    "OZK Ameen Backup Health Monitor"
+    "OZK Ameen Backup Health Monitor",
+    "TOBACCO Ameen Invoice Agent Monitor"
   ],
   "_routingExempt": "Tasks whose own code is pinned outside the repository (they only call into it). They cannot honour deploying.flag, so the gate applies startGuardSeconds to them instead of requiring run-repo-task.ps1. Every other enabled pauseTask must be routed through run-repo-task.ps1 before -Mode Deploy (DryRun only warns).",
   "routingExempt": [
@@ -134,6 +138,16 @@
         "scripts/serve.mjs"
       ],
       "untrackedFiles": []
+    },
+    {
+      "name": "TOBACCO Ameen Invoice Agent",
+      "runner": "Scheduled Task (LOQ, S4U, Limited; Boot + 5 min and every 10 min, IgnoreNew) -> powershell -File tools/ameen-invoice-event-agent.ps1 -OutboxDir/-LogFile/-EnvFile, one long process (DRY RUN unless the task passes -Send and send-enabled.flag exists). It dot-sources tools/ameen-invoice-events-lib.ps1 once at start, so a deploy leaves the running process on the old code: the gate records DEPLOYED_PENDING_RESTART and never restarts it. The restart, the connection file and -StrictEnvFile/-Send are owner decisions outside the gate.",
+      "files": [
+        "tools/ameen-invoice-event-agent.ps1",
+        "tools/ameen-invoice-events-lib.ps1"
+      ],
+      "untrackedFiles": [],
+      "taskName": "TOBACCO Ameen Invoice Agent"
     }
   ],
   "liveServedFromRepo": {

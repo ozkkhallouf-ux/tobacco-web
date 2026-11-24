@@ -13,8 +13,11 @@ const model = require("../../manual-a4-print/lib/invoice-model");
 const { HASH_SCHEMA, invoiceVersionHash, legacyVersionHash, jobIdFor, sha256 } = require("./fingerprint");
 const { folderPlan, fileName } = require("./naming");
 const { STATUS } = require("./store");
-const { MODES, pilotExpired } = require("./config");
+const { MODES, pilotExpired, receiptsPilotExpired } = require("./config");
 const { redact } = require("./redact");
+const { priceInvoiceItems } = require("./line-prices");
+const { createReceiptArchiver } = require("./receipts");
+const RECEIPT_DOC_TYPE = require("./receipt-model").DOC_TYPE;
 
 const DOC_TYPE = "wholesale_invoice";
 // أخطاء تخصّ الاتصال أو الحساب لا المهمة: توقف المرحلة كلها في هذه الدورة بلا عدّ محاولات.
@@ -37,14 +40,30 @@ function rowHint(row) {
   return sha256(JSON.stringify(rest));
 }
 
-function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive, edge, log, now = () => Date.now() }) {
+function createArchiver({ cfg, store, ameen, renderer, template, receiptTemplate = null, paper, getDrive, edge, log, now = () => Date.now() }) {
   const mode = MODES[cfg.mode];
   const state = store.state;
   state.hints = state.hints || {};
   // التجربة المحصورة: كل المراحل (رصد، رفع، إشعار، تقرير، توثيق المصدر) ترى هذه الفواتير وحدها.
   // ما يُتخطّى هنا لا يُعلَّم ملحوظاً (لا تلميح)، فتلتقطه المطابقة الدورية بعد رفع الحصر.
   const pilot = new Set((cfg.pilotInvoiceGuids || []).map((g) => model.normGuid(g)));
-  const inScope = (guid) => pilot.size === 0 || pilot.has(model.normGuid(guid));
+  // نطاق الإنتاج: فاتورة في لقطة الأساس (موجودة لحظة التفعيل) خارج كل المراحل نهائياً، ومعها
+  // حدّ CreateDate في الاستعلام وهنا (حماية مزدوجة لا تعتمد على تاريخ الفاتورة المكتوب).
+  const baseline = new Set((cfg.baselineGuids || []).map((g) => model.normGuid(g)));
+  const createdFrom = cfg.newInvoicesFrom || null;
+  const inScope = (guid) => (pilot.size === 0 || pilot.has(model.normGuid(guid))) && !baseline.has(model.normGuid(guid));
+  const createdBeforeCutoff = (row) => Boolean(createdFrom) &&
+    !(Date.parse(`${String(row.created_at || "").replace(/Z$/, "")}Z`) >= Date.parse(`${createdFrom}Z`));
+  // سندات القبض (المرحلة 2): مطفأة افتراضياً. مفعّلة ⇒ رصد مستقل بنطاقه، ومراحل الرفع والإشعار
+  // والتقرير أدناه نفسها. انتهاء حصر تجربتها أثناء العمل يوقف رصدها ورفعها وإرسالها وحدها.
+  const receiptsOn = Boolean(cfg.receipts && cfg.receipts.enabled && ameen && receiptTemplate);
+  const receipts = receiptsOn
+    ? createReceiptArchiver({ cfg, store, ameen, renderer, template: receiptTemplate, paper, emit: (e, d) => emit(e, d), now })
+    : null;
+  const receiptsLive = () => Boolean(receipts) && !receiptsPilotExpired(cfg, now());
+  const jobInScope = (j) => (j.docType === RECEIPT_DOC_TYPE
+    ? receiptsLive() && receipts.inScope(j.receiptGuid)
+    : inScope(j.sourceGuid));
   let folderCache = {};
   let driveState = mode.upload ? "disconnected" : "disabled";
   let driveCheckedAt = null;
@@ -91,7 +110,10 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   async function renderInvoice(header, lines, outPath) {
     const balance = await ameen.balance(header.guid);
     const inv = model.buildInvoice(header, lines, balance);
-    const html = template.buildInvoiceHtml(inv);
+    // سعر الوحدة وإجمالي السطر للأرشيف وحده؛ عدم المطابقة ⇒ القالب كما كان + سبب بلا مبالغ.
+    const priced = priceInvoiceItems(inv, lines);
+    if (!priced.ok) emit("line_prices_skipped", { number: header.number, reason: priced.reason });
+    const html = template.buildInvoiceHtml(priced.inv, { linePrices: priced.ok });
     const fontEmbedded = /@font-face\{font-family:"Cairo"/.test(html);
     const result = await renderer.render(html, paper, outPath);
     if (cfg.requireOfficialFont && !(fontEmbedded && result.fontOk)) {
@@ -120,7 +142,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     const all = [];
     let cursor = { since: window.since, sinceGuid: window.sinceGuid || "" };
     for (let page = 0; page < 40; page++) {
-      const rows = await ameen.changedInvoices({ ...cursor, dateFrom: window.dateFrom });
+      const rows = await ameen.changedInvoices({ ...cursor, dateFrom: window.dateFrom, createdFrom });
       all.push(...rows);
       if (rows.length < 500) return { rows: all, complete: true, cursor: null };
       const last = rows[rows.length - 1];
@@ -153,7 +175,9 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       typeGuid: header.typeGuid,
       customerGuid: header.customerGuid,
       customerName: header.customer,
-      amount: Math.round((header.total - header.discount) * 1000) / 1000,
+      // «الصافي» نفسه المطبوع في الـPDF (invoiceSummary في القالب): Total − الحسم + التدوير (TotalExtra).
+      // مصدر واحد للإشعار وتقرير الموقع والورقة؛ المدفوع والمتبقي خارج المبلغ كما كانا.
+      amount: Math.round(template.invoiceSummary(header).net * 1000) / 1000,
       currencyIso: header.currencyIso,
       version,
       versionHash,
@@ -285,6 +309,8 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   async function detectRow(row) {
     const header = headerOf(row);
     if (!header.guid || !inScope(header.guid)) return "skip";
+    // أُنشئت قبل التفعيل (أو بلا وقت إنشاء مقروء) ⇒ ليست جديدة، ولو أعادها المصدر.
+    if (createdBeforeCutoff(row)) return "skip";
     // غير المرحّلة ليست نسخة نهائية. فاتورة مؤرشفة أُلغي ترحيلها أو تغيّر نوعها تُوثَّق فقط.
     if (!header.printable) { noteSourceIssue(header.guid, "type_changed"); return "skip"; }
     if (!header.isPosted) { noteSourceIssue(header.guid, "unposted"); return "skip"; }
@@ -311,7 +337,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       .filter((g) => model.isGuid(g) && inScope(g) && now() >= (Number(state.detectErrors[g].nextAt) || 0))
       .slice(0, 50);
     for (const guid of dueGuids) {
-      const [row] = await ameen.changedInvoices({ since: "1900-01-01T00:00:00", sinceGuid: "", dateFrom: cfg.archiveFrom, onlyGuid: guid });
+      const [row] = await ameen.changedInvoices({ since: "1900-01-01T00:00:00", sinceGuid: "", dateFrom: cfg.archiveFrom, onlyGuid: guid, createdFrom });
       const outcome = row ? await detectRow(row) : "gone";
       if (outcome !== "error") delete state.detectErrors[guid];
     }
@@ -418,7 +444,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   }
 
   async function uploadStage() {
-    const ready = store.jobs().filter((j) => j.status === STATUS.RENDERED && inScope(j.sourceGuid) && due(j));
+    const ready = store.jobs().filter((j) => j.status === STATUS.RENDERED && jobInScope(j) && due(j));
     let drive;
     try {
       drive = getDrive();
@@ -450,10 +476,87 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   }
 
   // ─── الإشعار ───
-  async function notifyStage() {
-    const ready = store.jobs().filter((j) => j.status === STATUS.UPLOADED && j.drive && j.drive.fileId && inScope(j.sourceGuid) && due(j));
+  // تحديث جماعي: فواتير جملة معدَّلة (version > 1) جاهزة معاً أكثر من الحدّ المسموح تُرسَل
+  // برسالة ملخص واحدة (notifyBatchStage) بدل إشعار مستقل لكل واحدة. فاتورة جديدة (version 1)
+  // أو تعديل وحيد أو قليل تبقى على المسار الفردي كما كانت — لا تغيير في تلك الحالات.
+  //
+  // دالة Edge (document-archive-notify/index.ts) ترفض أي طلب /notify-batch يتجاوز
+  // BATCH_MAX_ITEMS=200 عنصراً كاملاً (Codex P1، PR #437): فتُقسَّم القائمة هنا إلى دفعات
+  // (chunks) ≤200 عنصر، كل واحدة بطلب /notify-batch مستقل بمعزل كامل عن الأخرى — فشل دفعة
+  // لا يمسّ دفعة نجحت قبلها أو بعدها، ولا يُعاد إرسالها معها. لا تغيير على الحجز الذري
+  // (claim/finish) ولا على تصنيف unknown/sent: نفس استدعاء edge.notifyBatch لكل دفعة.
+  const NOTIFY_BATCH_CHUNK_SIZE = 200;
+
+  function chunked(list, size) {
+    const out = [];
+    for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+    return out;
+  }
+
+  async function notifyOneBatch(jobs) {
     let notified = 0;
-    for (const job of ready.sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    try {
+      const res = await edge.notifyBatch(jobs);
+      const notifiedIds = new Set(res.notifiedJobIds);
+      const heldIds = new Set(res.heldJobIds);
+      const unknownIds = new Set(res.unknownJobIds);
+      for (const job of jobs) {
+        if (notifiedIds.has(job.jobId) || Object.prototype.hasOwnProperty.call(res.alreadySent, job.jobId)) {
+          const duplicate = !notifiedIds.has(job.jobId);
+          // كل عنصر برقم رسالته الخاصة: الدفعة قد تنقسم إلى أكثر من رسالة تيليغرام.
+          const messageId = duplicate ? res.alreadySent[job.jobId] : res.notifiedMessageIds[job.jobId];
+          job.telegram = { messageId, duplicate, sentAt: new Date(now()).toISOString() };
+          job.status = STATUS.NOTIFIED;
+          job.attempts = 0;
+          job.nextAttemptAt = 0;
+          job.lastError = null;
+          store.saveJob(job);
+          notified++;
+        } else if (unknownIds.has(job.jobId)) {
+          holdJob(job, "notify", "DELIVERY_UNKNOWN");
+        } else {
+          // in_progress (حجز قائم من محاولة متزامنة)، أو لا بتّ له بعد: انتظار قصير بلا فشل.
+          holdJob(job, "notify", "IN_PROGRESS");
+        }
+      }
+      if (notifiedIds.size) emit("notified_batch", { count: notifiedIds.size, jobIds: [...notifiedIds] });
+      return { notified, stopAll: false };
+    } catch (err) {
+      if (GLOBAL_EDGE.has(err && err.code)) {
+        emit("notify_unavailable", { code: err.code, message: err.message });
+        return { notified, stopAll: true }; // عطل اتصال أو حساب: الدفعات التالية ستفشل بالسبب نفسه
+      }
+      if (err && err.code === "DELIVERY_UNKNOWN") {
+        for (const job of jobs) holdJob(job, "notify", "DELIVERY_UNKNOWN");
+        return { notified, stopAll: false };
+      }
+      for (const job of jobs) failJob(job, "notify", err);
+      return { notified, stopAll: false };
+    }
+  }
+
+  async function notifyBatchStage(jobs) {
+    let notified = 0;
+    for (const group of chunked(jobs, NOTIFY_BATCH_CHUNK_SIZE)) {
+      const result = await notifyOneBatch(group);
+      notified += result.notified;
+      if (result.stopAll) break;
+    }
+    return notified;
+  }
+
+  async function notifyStage() {
+    const ready = store.jobs().filter((j) => j.status === STATUS.UPLOADED && j.drive && j.drive.fileId && jobInScope(j) && due(j));
+    const sorted = ready.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    // الحصر بفواتير الجملة المعدَّلة وحدها: فاتورة جديدة تبقى إشعاراً فورياً مستقلاً دائماً،
+    // وسندات القبض (مرحلة أخرى، مستند مستقل لكل زبون) لا تُجمَّع هنا.
+    const burstEligible = sorted.filter((j) => j.docType === DOC_TYPE && j.changeKind === "edited");
+    const batchIds = burstEligible.length > cfg.burstNotifyThreshold ? new Set(burstEligible.map((j) => j.jobId)) : null;
+
+    let notified = 0;
+    let stopped = false;
+    for (const job of sorted) {
+      if (batchIds && batchIds.has(job.jobId)) continue; // تُرسَل كدفعة واحدة أدناه
       let pdf;
       try {
         pdf = fs.readFileSync(store.pdfPath(job.jobId));
@@ -479,6 +582,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       } catch (err) {
         if (GLOBAL_EDGE.has(err && err.code)) {
           emit("notify_unavailable", { code: err.code, message: err.message });
+          stopped = true;
           break;
         }
         if (err && (err.code === "IN_PROGRESS" || err.code === "DELIVERY_UNKNOWN")) {
@@ -488,6 +592,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
         failJob(job, "notify", err);
       }
     }
+    if (batchIds && !stopped) notified += await notifyBatchStage(burstEligible);
     return { notified };
   }
 
@@ -537,7 +642,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     // مؤشر مستقل للتجربة: تقدّمه لا يتخطّى مهام خارج الحصر فلا تُبلَّغ أبداً بعد رفعه.
     const cursorKey = pilot.size ? "lastReportedUpdatePilot" : "lastReportedUpdate";
     const since = state[cursorKey] || "";
-    const changed = store.jobs().filter((j) => (j.updatedAt || "") > since && inScope(j.sourceGuid))
+    const changed = store.jobs().filter((j) => (j.updatedAt || "") > since && jobInScope(j))
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt)).slice(0, 200);
     const s = store.summary({ notifyEnabled: mode.notify });
     const payload = {
@@ -548,7 +653,8 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       drive_checked_at: driveCheckedAt,
       last_success_at: s.lastSuccessAt,
       pending_count: s.pending,
-      failed_count: s.failed + Object.keys(state.detectErrors || {}).length,
+      failed_count: s.failed + Object.keys(state.detectErrors || {}).length
+        + Object.keys((state.receipts && state.receipts.detectErrors) || {}).length,
       items: changed.map(reportItem),
     };
     try {
@@ -574,11 +680,22 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
 
   async function cycle({ host = "", version = "dev" } = {}) {
     const out = { detect: null, upload: null, notify: null, report: null };
+    if (createdFrom) out.scope = { newInvoicesFrom: createdFrom, baseline: baseline.size };
     if (pilot.size && !pilotGate(out)) return out;
     try {
       out.detect = await detect();
     } catch (err) {
       emit("detect_failed", { code: err && err.code, message: err && err.message });
+    }
+    if (receipts) {
+      if (!receiptsLive()) emit("receipts_pilot_expired", { expiresAt: cfg.receipts.pilotExpiresAt });
+      else {
+        try {
+          out.receipts = await receipts.detect();
+        } catch (err) {
+          emit("receipts_detect_failed", { code: err && err.code, message: err && err.message });
+        }
+      }
     }
     if (mode.upload) out.upload = await uploadStage();
     if (mode.notify && edge) out.notify = await notifyStage();

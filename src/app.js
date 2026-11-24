@@ -208,6 +208,12 @@ const state = {
   customerBalanceReports: [],
   customerMovementsReport: null,
   customerInvoicesReport: null,
+  customerInvoicesBaseReport: null,
+  liveInvoicesBase: null,
+  liveInvoicesSignature: "",
+  liveInvoicesPrices: null,
+  liveInvoicesBalances: null,
+  liveInvoicesStats: null,
   invoiceSeriesReport: null,   // آخر رقم فاتورة لكل سلسلة ترقيم في الأمين
   customerWhatsapp: [],
   broadcastType: "",
@@ -344,6 +350,22 @@ const state = {
   bulletinPdfTheme: readJson("bulletin-pdf-theme", "dark") === "light" ? "light" : "dark",
   openSections: {},
   priceMode: readJson("price-mode", "jumla"),
+  // تصحيحات تصنيف النشرة (عامة/وزاري) المحفوظة في Supabase — src/bulletin-classification.js
+  bulletinClassifications: [],
+  bulletinClassificationsStatus: "idle",
+  bulletinClassificationsError: null,
+  // ظهور الأصناف في نشرة الأسعار (عام/مخفي) — src/bulletin-visibility.js
+  // الجدول الكامل (أسماء/أسباب)، مقيّد بالمالك عبر RLS — لشاشة الإدارة فقط.
+  bulletinVisibility: [],
+  bulletinVisibilityStatus: "idle",
+  bulletinVisibilityError: null,
+  // نافذة bulletin_hidden_items_feed العامة (item_key فقط) — هذا هو المصدر
+  // الذي تُفلتَر النشرة الفعلية (معاينة وتصدير) عليه، لأنه يُقرأ بلا شرط صلاحية
+  // أو جلسة، بعكس الجدول أعلاه. null تعني لم يُحمَّل بثقة بعد (يمنع التوليد).
+  publicBulletinHidden: null,
+  publicBulletinHiddenStatus: "idle",
+  publicBulletinHiddenError: null,
+  pricingVisibilityFilter: readJson("pricing-visibility-filter", "all"),
   showExchangeModal: false,
   pricePreview: null
 };
@@ -774,6 +796,10 @@ async function boot() {
       balances: loadCustomerBalanceReports,
       creditLimits: loadCustomerCreditLimits,
       prices: loadApprovedPriceItems,
+      // بلا شرط جلسة عمداً — بعكس بقية هذه المراحل: موظف غير مالك أو زائر
+      // مسجَّل يفتح معاينة/تصدير النشرة يحتاج هذه النسخة محمَّلة منذ الإقلاع
+      // (راجع prepareBulletinItems/loadPublicBulletinHidden).
+      publicHiddenItems: loadPublicBulletinHidden,
       profiles: loadCustomerProfiles,
       purchases: loadPurchaseInvoices,
       warehouses: async () => {
@@ -1258,12 +1284,14 @@ async function loadCustomerBalanceReports() {
     state.customerMovementsReport = null;
   }
   try {
-    state.customerInvoicesReport = dataStore.getCustomerInvoicesReport
+    state.customerInvoicesBaseReport = dataStore.getCustomerInvoicesReport
       ? await dataStore.getCustomerInvoicesReport()
       : null;
   } catch {
-    state.customerInvoicesReport = null;
+    state.customerInvoicesBaseReport = null;
   }
+  state.customerInvoicesReport = state.customerInvoicesBaseReport;
+  await loadLiveInvoices();
   try {
     state.poAmeenReport = dataStore.getPurchaseInvoicesAmeenReport
       ? await dataStore.getPurchaseInvoicesAmeenReport()
@@ -1279,6 +1307,93 @@ async function loadCustomerBalanceReports() {
     state.invoiceSeriesReport = null;
   }
   await loadCustomerWhatsapp();
+}
+
+// ===== التحديث الدوري وخانات البحث =====
+// التحديث الدوري (الفواتير الفورية كل 10 ث والتقارير كل دقيقة) كان يتوقف كلياً ما دام
+// المؤشر في أي خانة إدخال، حتى القراءة نفسها. فمن يكتب اسم الزبون في بحث «أرصدة الزبائن»
+// ويبقى المؤشر فيها لا تصله البيانات الجديدة، وحين يفتح الزبون تُرسم له النسخة القديمة
+// (عمر 2026-11-03: فاتورة 1178 وصلت السيرفر بثانيتين ولم تظهر). خانة البحث لا تحمل إدخالاً
+// يضيع: قيمتها في state. فصار التحديث يقرأ دائماً، ويحدّث قائمة النتائج وحدها تحت الخانة
+// (نفس دالة الكتابة في البحث) دون أن يمسّ الخانة نفسها ولا لوحة المفاتيح على الهاتف.
+// حقول النماذج الأخرى (سعر، حد ائتمان، دفعة...) تبقى محمية كما كانت: لا تحديث أثناء الكتابة.
+// وبطاقة الزبون المفتوحة فوق القائمة تتحدّث معها (أرقامها وفواتيرها ودفعاتها)، وإلا بقي
+// الرصيد الجديد في القائمة والفاتورة غائبة عن البطاقة (عمر 2026-11-05، فاتورة 1195).
+const LIVE_REFRESH_SEARCH_UPDATERS = {
+  "data-customer-search": () => { updateCustomerBalanceResults(); refreshCustomerDetailPanelData(); },
+  "data-ameen-search": () => updateAmeenBrowserResults()
+};
+
+function focusedSearchAttr(el = document.activeElement) {
+  if (!el || el.tagName !== "INPUT") return "";
+  return Object.keys(LIVE_REFRESH_SEARCH_UPDATERS).find((attr) => el.hasAttribute(attr)) || "";
+}
+
+function isEditingFormField(el = document.activeElement) {
+  if (!el || !(el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT")) return false;
+  return !focusedSearchAttr(el);
+}
+
+// إعادة رسم بعد تحديث دوري: كاملة عادةً، وقائمة النتائج وحدها إن كان المؤشر في خانة بحث.
+function renderAfterPeriodicRefresh() {
+  const attr = focusedSearchAttr();
+  if (attr) { LIVE_REFRESH_SEARCH_UPDATERS[attr](); return; }
+  render();
+}
+
+// تحديث جزئي لبطاقة الزبون المفتوحة: أرقامها وقوائم الفواتير والمرتجعات والدفعات فقط.
+// رأس البطاقة ونموذج تسجيل الدفعة لا يُمسّان، فلا يضيع مبلغ مكتوب ولا تركيز.
+function refreshCustomerDetailPanelData() {
+  const panel = app.querySelector("[data-customer-detail-panel]");
+  if (!panel || !state.selectedCustomerKey) return;
+  const item = selectedCustomer(latestCustomerBalanceItems());
+  if (!item) return;
+  const holder = document.createElement("div");
+  holder.innerHTML = customerDetailsPanel(item);
+  for (const selector of [".customer-detail-metrics", ".customer-detail-grid"]) {
+    const current = panel.querySelector(selector);
+    const fresh = holder.querySelector(selector);
+    if (!current || !fresh || current.innerHTML === fresh.innerHTML) continue;
+    current.replaceWith(fresh);
+    bindMovementDocButtons(fresh);
+  }
+}
+
+// ===== الفواتير الفورية (ameen_invoices) فوق تقرير الفواتير =====
+// وكيل أحداث الفواتير يرفع كل فاتورة جديدة أو معدّلة أو محذوفة خلال ثوانٍ. هنا تُدمج
+// فوق لقطة التقرير (src/live-invoices.js): الأحدث يفوز، والنسخة الفورية لا تُقبل إلا
+// إن طابق مجموع أسطرها إجمالي الفاتورة في الأمين. عرض فقط — لا كتابة على أي جدول.
+// `state.customerInvoicesBaseReport` اللقطة كما وصلت، و`state.customerInvoicesReport`
+// الناتج المدموج الذي تقرؤه كل الشاشات. فشل القراءة الفورية يُبقي اللقطة كما هي.
+async function loadLiveInvoices() {
+  const base = state.customerInvoicesBaseReport;
+  const engine = window.ozkLiveInvoices;
+  if (!engine || !dataStore.listLiveAmeenInvoices) return false;
+  let rows;
+  try {
+    rows = await dataStore.listLiveAmeenInvoices(engine.liveFetchSince(base, Date.now()));
+  } catch {
+    return false;
+  }
+  const signature = rows.map((r) => `${r.bill_guid}:${r.source_seq}`).join("|");
+  // مدخلات الدمج كلها في مفتاح الذاكرة: اللقطة والصفوف ولائحة الأسعار (دليل المواد
+  // الاحتياطي) والأرصدة (أسماء المجموعات الجديدة). عند الدخول تُحمَّل الأسعار بعد
+  // الفواتير، فصف رُفض بـunknown_item يجب أن يُعاد دمجه حين تصل اللائحة.
+  const prices = state.approvedPriceItems;
+  const balances = (state.customerBalanceReports && state.customerBalanceReports[0]) || null;
+  if (base === state.liveInvoicesBase && signature === state.liveInvoicesSignature
+    && prices === state.liveInvoicesPrices && balances === state.liveInvoicesBalances) return false;
+  state.liveInvoicesBase = base;
+  state.liveInvoicesSignature = signature;
+  state.liveInvoicesPrices = prices;
+  state.liveInvoicesBalances = balances;
+  const { report, stats } = engine.mergeLiveInvoices(base, rows, {
+    priceItems: state.approvedPriceItems,
+    balanceItems: latestCustomerBalanceItems()
+  });
+  state.customerInvoicesReport = report;
+  state.liveInvoicesStats = stats;
+  return true;
 }
 
 // ===== هوية الزبون والفاتورة: المعرّف أولاً، الاسم احتياطاً =====
@@ -2202,6 +2317,118 @@ async function loadApprovedPriceItems() {
     state.approvedPriceItems = [];
     state.approvedPriceError = safeErrorMessage(error);
   }
+  await loadBulletinClassifications();
+  await loadBulletinVisibility();
+  // لائحة الأسعار احتياط دليل المواد للفواتير الفورية: وصولها يعيد الدمج فوراً.
+  await loadLiveInvoices();
+}
+
+// تصحيحات تصنيف النشرة: فشل التحميل لا يُسقط الصفحة — يبقى التصنيف على
+// التصحيحات المؤكدة المثبّتة وقاعدة الاسم، ويُعلن السبب في قسم الوزاري.
+async function loadBulletinClassifications() {
+  if (!dataStore.listItemBulletinClassifications || (dataStore.isConfigured() && !state.session)) {
+    state.bulletinClassifications = [];
+    state.bulletinClassificationsStatus = "idle";
+    state.bulletinClassificationsError = null;
+    return;
+  }
+  try {
+    const result = await dataStore.listItemBulletinClassifications();
+    state.bulletinClassifications = result.rows || [];
+    state.bulletinClassificationsStatus = result.available === false ? "not_installed" : "ok";
+    state.bulletinClassificationsError = null;
+  } catch (error) {
+    state.bulletinClassifications = [];
+    state.bulletinClassificationsStatus = "error";
+    state.bulletinClassificationsError = safeErrorMessage(error);
+  }
+}
+
+// ظهور الأصناف في نشرة الأسعار: فشل التحميل لا يُسقط الصفحة، ولا يُخفي شيئاً
+// صامتاً — كل الأصناف تبقى ظاهرة بصرياً هنا (الحالة الافتراضية) والسبب يظهر
+// في رسالة الخطأ. الإخفاء الفعلي عن الزبائن يحدث فقط في مولّد النشرات، الذي
+// يرتدّ بنفس المنطق (لا يُخفي شيئاً إن تعذّرت عليه القراءة).
+async function loadBulletinVisibility() {
+  if (!dataStore.listItemBulletinVisibility || (dataStore.isConfigured() && !state.session)) {
+    state.bulletinVisibility = [];
+    state.bulletinVisibilityStatus = "idle";
+    state.bulletinVisibilityError = null;
+    return;
+  }
+  try {
+    const result = await dataStore.listItemBulletinVisibility();
+    state.bulletinVisibility = result.rows || [];
+    state.bulletinVisibilityStatus = result.available === false ? "not_installed" : "ok";
+    state.bulletinVisibilityError = null;
+  } catch (error) {
+    state.bulletinVisibility = [];
+    state.bulletinVisibilityStatus = "error";
+    state.bulletinVisibilityError = safeErrorMessage(error);
+  }
+}
+
+// نسخة محلية موثوقة من نافذة bulletin_hidden_items_feed العامة — بنفس منطق
+// ذاكرة التخزين المؤقت لمولّد النشرات المستقل (scripts/generate-price-lists.mjs)
+// حرفياً: نجاح القراءة يُحدّث النسخة المحفوظة، وفشلها يرتدّ إليها إن كانت أحدث
+// من 14 يوماً، وغياب أي نسخة صالحة يمنع توليد نشرة جديدة كلياً (لا إظهار تلقائي).
+const PUBLIC_HIDDEN_CACHE_KEY = "ozk_public_bulletin_hidden_cache";
+const PUBLIC_HIDDEN_CACHE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+function readBulletinHiddenCache() {
+  const parsed = readJson(PUBLIC_HIDDEN_CACHE_KEY, null);
+  if (!parsed || !Array.isArray(parsed.rows)) return null;
+  const rowsValid = parsed.rows.every((row) => row && typeof row.item_key === "string" && row.item_key.trim());
+  if (!rowsValid) return null;
+  const savedAtMs = Date.parse(parsed.savedAt || "");
+  if (!Number.isFinite(savedAtMs)) return null;
+  if (Date.now() - savedAtMs > PUBLIC_HIDDEN_CACHE_MAX_AGE_MS) return null;
+  return { rows: parsed.rows, savedAt: parsed.savedAt };
+}
+
+function writeBulletinHiddenCache(rows) {
+  writeJson(PUBLIC_HIDDEN_CACHE_KEY, { rows, savedAt: new Date().toISOString() });
+}
+
+// الأصناف المخفية عن الزبائن فعلياً — من النافذة العامة بلا شرط جلسة، بعكس
+// state.bulletinVisibility أعلاه (مقيّد بالمالك، لشاشة الإدارة فقط). فشل القراءة
+// هنا لا يجوز أن يُظهر كل الأصناف تلقائياً: نرتدّ لآخر نسخة موثوقة، وبغيابها
+// نوقف توليد النشرة (state.publicBulletinHidden يبقى null) مع تنبيه صريح للمالك.
+async function loadPublicBulletinHidden() {
+  if (!dataStore.listPublicBulletinHiddenKeys) {
+    state.publicBulletinHidden = [];
+    state.publicBulletinHiddenStatus = "idle";
+    state.publicBulletinHiddenError = null;
+    return;
+  }
+  try {
+    const result = await dataStore.listPublicBulletinHiddenKeys();
+    if (result.available === false) {
+      // النافذة غير مفعّلة بعد (قبل تطبيق Migration 30) — لا أصناف مخفية، ظاهرة كلها كالعادة.
+      state.publicBulletinHidden = [];
+      state.publicBulletinHiddenStatus = "not_installed";
+      state.publicBulletinHiddenError = null;
+      return;
+    }
+    state.publicBulletinHidden = result.rows || [];
+    state.publicBulletinHiddenStatus = "ok";
+    state.publicBulletinHiddenError = null;
+    writeBulletinHiddenCache(state.publicBulletinHidden);
+  } catch (error) {
+    const cached = readBulletinHiddenCache();
+    if (cached) {
+      state.publicBulletinHidden = cached.rows;
+      state.publicBulletinHiddenStatus = "degraded";
+      state.publicBulletinHiddenError =
+        `تعذّر تحديث إعدادات إخفاء الأصناف؛ استُخدمت آخر نسخة موثوقة بتاريخ ${cached.savedAt} ` +
+        `(${cached.rows.length} صنفاً مخفياً). راجع الاتصال بقاعدة البيانات في أقرب فرصة.`;
+    } else {
+      // لا نسخة موثوقة على الإطلاق: يُمنع توليد نشرة جديدة كلياً كي لا تُسرّب صنفاً
+      // أخفاه المالك عمداً. prepareBulletinItems يتحقق من هذا الحقل ويرفض التوليد.
+      state.publicBulletinHidden = null;
+      state.publicBulletinHiddenStatus = "blocked";
+      state.publicBulletinHiddenError = safeErrorMessage(error);
+    }
+  }
 }
 
 async function loadPaymentRecords(customerKey) {
@@ -2305,6 +2532,7 @@ function setRoute(route, clearNotice = true) {
   // لا إلى الأرشيف، كي لا تفتح «فاتورة مبيعات» فتجد قائمة الفواتير القديمة.
   state.salesHistoryOpen = false;
   cancelSalesHistorySearch();
+  window.OzkSalesPriceRequests?.close();
   if (clearNotice) state.notice = null;
   if (state.route === "smartInventory" && state.session) window.SmartInventory?.load(state.session);
   render();
@@ -3178,19 +3406,80 @@ function customerPriceListItems(mode, options) {
   return consolidateGeneralPriceItems(items, mode);
 }
 
+// التصنيف عامة/وزاري من مصدر واحد مشترك مع مولّد النشرات
+// (src/bulletin-classification.js): تصحيح المالك بالـGUID ← تصحيح مؤكد مثبّت ← قاعدة الاسم.
+let _bulletinIndexRef = null;
+let _bulletinIndex = null;
+function bulletinOverrideIndex() {
+  const engine = window.ozkBulletinClassification;
+  if (!engine) return null;
+  if (_bulletinIndex && _bulletinIndexRef === state.bulletinClassifications) return _bulletinIndex;
+  _bulletinIndexRef = state.bulletinClassifications;
+  _bulletinIndex = engine.buildOverrideIndex(state.bulletinClassifications || []);
+  return _bulletinIndex;
+}
+
+function itemBulletinClassification(item) {
+  const engine = window.ozkBulletinClassification;
+  if (!engine) throw new Error("src/bulletin-classification.js لم يُحمَّل قبل app.js");
+  return engine.classifyItem(item, bulletinOverrideIndex());
+}
+
 function isWazariPriceItem(item) {
-  const name = normalizeItemName(item.name || item.itemName || "");
-  if (name.includes("نخله") && (name.includes("محزر") || name.includes("وزاري"))) return true;
-  if (name.includes("كينت") && !name.includes("حره")) return true;
-  if (name.includes("وينستون") && !name.includes("حره")) return true;
-  if (name.includes("فاخر") && name.includes("اسود") && name.includes("محزر")) return true;
-  if (
-    name.includes("مالبورو") &&
-    (name.includes("محزر") ||
-      (name.includes("ورق") && (name.includes("ابيض") || name.includes("احمر"))) ||
-      (name.includes("كوين") && name.includes("ازرق")))
-  ) return true;
-  return false;
+  return itemBulletinClassification(item).bulletin === "wazari";
+}
+
+// ظهور الأصناف في النشرة الموجهة للزبائن — مصدر واحد مشترك مع المولّد
+// (src/bulletin-visibility.js). الحالة الافتراضية: ظاهر. غياب الفهرس (الوحدة
+// لم تُحمَّل) لا يُعامَل كإخفاء — يعني فقط أن كل الأصناف تبقى ظاهرة.
+let _bulletinVisibilityIndexRef = null;
+let _bulletinVisibilityIndex = null;
+function bulletinVisibilityIndex() {
+  const engine = window.ozkBulletinVisibility;
+  if (!engine) return null;
+  if (_bulletinVisibilityIndex && _bulletinVisibilityIndexRef === state.bulletinVisibility) {
+    return _bulletinVisibilityIndex;
+  }
+  _bulletinVisibilityIndexRef = state.bulletinVisibility;
+  _bulletinVisibilityIndex = engine.buildHiddenIndex(state.bulletinVisibility || []);
+  return _bulletinVisibilityIndex;
+}
+
+function isItemHidden(item) {
+  const engine = window.ozkBulletinVisibility;
+  if (!engine) return false;
+  return engine.isHiddenItem(item, bulletinVisibilityIndex());
+}
+
+// فهرس الإخفاء الفعلي للزبائن — من النافذة العامة (state.publicBulletinHidden)
+// بلا شرط صلاحية مالك، بعكس bulletinVisibilityIndex أعلاه (للمالك وحده، لعدادات
+// شاشة الإدارة فقط). هذا هو المصدر الذي يستعمله prepareBulletinItems فعلياً،
+// وإلا يرى أي موظف غير مالك (أو زائر) فهرساً فارغاً صامتاً بسبب RLS فيظهر الصنف
+// المخفي في معاينته وتصديره رغم إخفائه عن مولّد النشرات المستقل.
+let _publicBulletinHiddenIndexRef = null;
+let _publicBulletinHiddenIndex = null;
+function publicBulletinHiddenIndex() {
+  const engine = window.ozkBulletinVisibility;
+  if (!engine) return null;
+  if (_publicBulletinHiddenIndex && _publicBulletinHiddenIndexRef === state.publicBulletinHidden) {
+    return _publicBulletinHiddenIndex;
+  }
+  _publicBulletinHiddenIndexRef = state.publicBulletinHidden;
+  _publicBulletinHiddenIndex = engine.buildHiddenIndex(state.publicBulletinHidden || []);
+  return _publicBulletinHiddenIndex;
+}
+
+function isHiddenFromCustomers(item) {
+  const engine = window.ozkBulletinVisibility;
+  if (!engine) return false;
+  // النافذة العامة (publicBulletinHiddenIndex) تُبنى من bulletin_hidden_items_feed
+  // التي تكشف item_key فقط بلا item_guid، فـbyGuid فيها فارغ دوماً. isHiddenItem
+  // يطابق بالـGUID أولاً إن توفّر في الصنف ويتوقف دون تجربة المفتاح — فتمرير الصنف
+  // كما هو (وفيه itemGuid من الأمين) يُسقِط المطابقة بالمفتاح صامتاً. مطابقة الأسماء
+  // تماماً كمولّد النشرات المستقل (scripts/generate-price-lists.mjs) بتجريد الصنف من
+  // GUID، فيبقى المفتاح/الاسم فقط ليطابق النافذة العامة فعلياً.
+  const key = item && (item.itemKey ?? item.item_key ?? item.key ?? item.name ?? item.itemName ?? item.item_name ?? "");
+  return engine.isHiddenItem({ itemKey: key }, publicBulletinHiddenIndex());
 }
 
 function hasFullSecondUnit(item) {
@@ -4070,8 +4359,30 @@ function prepareBulletinItems(useSyria = false, exchangeRate = Number(state.syri
   // الوضع من نوع النشرة المصدَّرة لا من تبويب الصفحة: تصدير نشرة السوري
   // والصفحة على وضع الجملة كان يدمج بقرار الوضع الخاطئ.
   const bulletinMode = useSyria ? "mufrak" : "jumla";
+  // بوابة الأمان: state.publicBulletinHidden يساوي null حين تعذّرت قراءة
+  // الأصناف المخفية عن الزبائن ولا توجد نسخة محلية موثوقة يُركن إليها (راجع
+  // loadPublicBulletinHidden). التوليد يتوقف هنا كلياً بدل إظهار كل الأصناف
+  // تلقائياً — فقد يكون من بينها صنف أخفاه المالك عمداً. لا أثر على المخزون أو المبيعات.
+  if (state.publicBulletinHidden === null) {
+    return {
+      ok: false,
+      message:
+        "تعذّر تحديث إعدادات إخفاء الأصناف عن الزبائن ولا توجد نسخة موثوقة محفوظة. " +
+        "توليد النشرة متوقف مؤقتاً كي لا يُظهر صنفاً مخفياً عمداً — تحقق من الاتصال وحدّث الصفحة."
+    };
+  }
+
   // الترشيح أولاً ثم الدمج: النشرة تُبنى من الأصناف المؤهَّلة وحدها.
   let items = customerPriceListItems(bulletinMode, { skipMerge: true });
+
+  // إخفاء المالك قبل أي تفرّع (وزاري/عام، دولار/سوري) — نفس الترتيب ونفس
+  // المصدر المشترك (src/bulletin-visibility.js) الذي يستعمله مولّد النشرات
+  // المستقل (scripts/generate-price-lists.mjs). المصدر هنا عمداً النافذة
+  // العامة (isHiddenFromCustomers عبر state.publicBulletinHidden) لا الجدول
+  // المقيَّد بالمالك (isItemHidden) — وإلا يرى أي موظف غير مالك فهرساً فارغاً
+  // صامتاً بسبب RLS فيظهر له الصنف المخفي في معاينته وتصديره (ملاحظة Codex P1
+  // على PR #443، الجزء المتعلق بغير المالك). لا أثر على المخزون أو approved_price_items.
+  items = items.filter((item) => !isHiddenFromCustomers(item));
 
   // الترشيح الكامل قبل الدمج في النشرتين، كترتيب المولّد حرفياً:
   // الجملة تستبعد ما دون وحدة ثانية كاملة، والسوري يستبعد ما لا سعر مفرق له.
@@ -4143,6 +4454,10 @@ async function openPricePreview(useSyria = false, theme = state.bulletinPdfTheme
     return;
   }
   state.syriaRateConfirmed = false;
+  // تحديث فهرس الإخفاء العام قبل كل فتح معاينة — يضمن أن المعاينة والتصدير
+  // اللاحق (exportPricePreview، متزامن ولا يستطيع الانتظار بنفسه) يستعملان
+  // أحدث حالة متاحة بدل ما حُمِّل عند بدء التشغيل فقط.
+  await loadPublicBulletinHidden();
   // الترقيم يُقاس عند كل رسم للمعاينة، فلا نرسمها قبل أن يجهز الخط.
   await awaitBulletinFontReady();
   const built = buildBulletinDataset(useSyria, theme);
@@ -4468,6 +4783,14 @@ function pricingWorklistItems({ ignoreSearch = false } = {}) {
     .sort((a, b) => Number(a.hasApprovedPrice) - Number(b.hasApprovedPrice) || String(a.name || "").localeCompare(String(b.name || ""), "ar"));
 }
 
+// قائمة تسعير الوزاري: كل صنف وزاري فعلي بمخزون موجب في آخر جرد، بلا دمج ولا
+// حد كرتونة (الحد يحكم ظهوره بنشرة الجملة فقط ويُعرض على البطاقة). غير المسعّر أولاً.
+function wazariPricingWorklistItems() {
+  return pricingWorklistItems({ ignoreSearch: true })
+    .filter((item) => isWazariPriceItem(item))
+    .map((item) => ({ ...item, sourceKeys: [] }));
+}
+
 // قائمة العمل داخل الموقع تطابق النشرة العامة: الوزاري منفصل والدمج ظاهر كما يراه الزبون.
 // حد الوحدة الثانية يخص الجملة فقط؛ المفرق السوري يبقى متاحاً لأي مخزون موجب حسب القاعدة المعتمدة.
 function generalPricingWorklistItems() {
@@ -4493,6 +4816,28 @@ function generalPricingWorklistItems() {
       .filter(Boolean);
     return { ...item, sourceKeys: [...new Set([...item.sourceKeys, ...groupKeys])] };
   });
+}
+
+// فلتر العرض (الكل/الظاهرة/المخفية) داخل شاشة إدارة النشرة فقط — لا يغيّر قائمة
+// العمل نفسها ولا يستبعد صنفاً من المزامنة أو التعديل، فالصنف المخفي يبقى قابلاً
+// للإظهار دوماً من نفس الشاشة. الأصناف المدموجة بلا GUID واحد تُحسب «ظاهرة»
+// لأنه لا يوجد تحكم إخفاء فردي عليها (نفس ما تعرضه pricingVisibilityLine).
+function applyPricingVisibilityFilter(items, filter) {
+  if (filter !== "shown" && filter !== "hidden") return items;
+  return items.filter((item) => {
+    const merged = Array.isArray(item.sourceKeys) && item.sourceKeys.length > 0;
+    const hidden = merged ? false : isItemHidden(item);
+    return filter === "hidden" ? hidden : !hidden;
+  });
+}
+
+function pricingVisibilityCounts(items) {
+  let hidden = 0;
+  items.forEach((item) => {
+    const merged = Array.isArray(item.sourceKeys) && item.sourceKeys.length > 0;
+    if (!merged && isItemHidden(item)) hidden += 1;
+  });
+  return { hidden, shown: items.length - hidden, total: items.length };
 }
 
 function downloadDailyPricingWorklist() {
@@ -4813,6 +5158,7 @@ function shell(content) {
           ${state.session ? navButton("balances", "💳 أرصدة الزبائن") : ""}
           ${navButton("pricing", "نشرة الأسعار")}
           ${state.session ? navButton("sales", "🧮 فاتورة مبيعات") : ""}
+          ${state.session && !isInventoryCounter() && window.OzkSalesPriceRequests ? window.OzkSalesPriceRequests.navButton(salesPriceRequestsCtx()) : ""}
           ${state.session ? navButton("purchases", "🧾 فواتير مشتريات") : ""}
           ${state.session ? navButton("warehouses", "🏭 المستودعات والمناقلات") : ""}
           ${state.session ? navButton("inventoryRecon", "📋 الجرد الشهري") : ""}
@@ -5849,6 +6195,8 @@ function pricingRow(item) {
       ${belowCostLine}
       ${retailHint}
       <span>${escapeHtml(priced ? "الأسعار مستقلة — راجع الحقلين" : statusLabel(item.status))}</span>
+      ${pricingBulletinLine(item)}
+      ${pricingVisibilityLine(item)}
       <form class="pricing-editor" data-form="pricing-item" data-item-key="${escapeHtml(item.key)}" data-source-keys="${escapeHtml(JSON.stringify(item.sourceKeys || []))}" data-item-name="${escapeHtml(item.name || "")}" data-stock-qty="${escapeHtml(qty)}" data-stock-status="${escapeHtml(item.status || "")}" data-unit1-name="${escapeHtml(unit1Name)}" data-unit2-name="${escapeHtml(unit2Name)}" data-unit2-factor="${escapeHtml(unit2Factor)}">
         <div class="pricing-editor-fields">
           <label>
@@ -5868,6 +6216,146 @@ function pricingRow(item) {
       </form>
     </div>
   `;
+}
+
+const BULLETIN_SOURCE_LABELS = Object.freeze({
+  owner_override: "تصحيح المالك",
+  confirmed_override: "تصحيح مؤكد بمعرّف الأمين",
+  name_rule: "حسب الاسم"
+});
+
+// سطر التصنيف على بطاقة التسعير. الجميع يرى النشرة التي يتبعها الصنف؛ المالك وحده
+// يرى نموذج تصحيح التصنيف (والقاعدة ترفض أي محاولة من غيره — Migration 28).
+function pricingBulletinLine(item) {
+  const merged = Array.isArray(item.sourceKeys) && item.sourceKeys.length > 0;
+  if (merged) return "";
+  const result = itemBulletinClassification(item);
+  const sourceLabel = BULLETIN_SOURCE_LABELS[result.source] || "";
+  const wazari = result.bulletin === "wazari";
+  const jumlaHint = wazari
+    ? (hasFullSecondUnit(item) ? "يظهر بنشرة الوزاري جملة ومفرق" : "مفرق فقط — أقل من وحدة ثانية كاملة لنشرة الجملة")
+    : "";
+  const guid = normGuid(item.itemGuid);
+  const canEdit = isOwner() && Boolean(guid) && Boolean(dataStore.setItemBulletinClassification);
+  const editor = canEdit
+    ? `<details class="bulletin-class-editor">
+        <summary>تصحيح التصنيف (المالك)</summary>
+        <form data-form="bulletin-classification" data-item-guid="${escapeHtml(guid)}" data-item-key="${escapeHtml(item.key || "")}" data-item-name="${escapeHtml(item.name || "")}" data-current="${escapeHtml(result.bulletin)}">
+          <label><span>النشرة</span>
+            <select name="bulletin">
+              <option value="general"${wazari ? "" : " selected"}>الأصناف العامة</option>
+              <option value="wazari"${wazari ? " selected" : ""}>الوزاري</option>
+              <option value="auto">حسب الاسم (إزالة التصحيح)</option>
+            </select>
+          </label>
+          <label><span>السبب (إلزامي، يُحفظ في سجل التدقيق)</span>
+            <input name="reason" type="text" minlength="3" maxlength="300" required placeholder="مثال: صنف عام وليس وزاري">
+          </label>
+          <button class="button secondary mini-button" type="submit">حفظ التصنيف</button>
+        </form>
+      </details>`
+    : "";
+  return `<div class="bulletin-class-line" data-bulletin="${escapeHtml(result.bulletin)}">
+      <small>التصنيف: <b>${escapeHtml(result.label)}</b> · ${escapeHtml(sourceLabel)}${jumlaHint ? ` · ${escapeHtml(jumlaHint)}` : ""}</small>
+      ${editor}
+    </div>`;
+}
+
+async function saveBulletinClassification(form) {
+  const bulletin = String(form.querySelector("[name='bulletin']")?.value || "");
+  const reason = String(form.querySelector("[name='reason']")?.value || "").trim();
+  try {
+    if (!isOwner()) throw new Error("تصحيح التصنيف للمالك فقط.");
+    if (!["general", "wazari", "auto"].includes(bulletin)) throw new Error("اختر النشرة.");
+    if (reason.length < 3) throw new Error("اكتب سبب التصحيح (3 أحرف على الأقل).");
+    await dataStore.setItemBulletinClassification({
+      itemGuid: form.dataset.itemGuid || "",
+      bulletin,
+      itemKey: form.dataset.itemKey || "",
+      itemName: form.dataset.itemName || "",
+      reason
+    });
+    await loadBulletinClassifications();
+    setNotice("success", `حُفظ تصنيف «${form.dataset.itemName || ""}». لا يتغيّر أي سعر.`);
+  } catch (error) {
+    setNotice("error", `تعذّر حفظ التصنيف: ${safeErrorMessage(error)}`);
+  }
+  render();
+}
+
+// سطر الظهور على بطاقة التسعير. الحالة يراها الجميع (كما سطر التصنيف)؛ زرّا
+// الإظهار/الإخفاء للمالك وحده — القاعدة ترفض أي محاولة من غيره (Migration 30).
+// الأصناف المدموجة (sourceKeys) بلا GUID واحد: بلا سطر ظهور، كسطر التصنيف تماماً.
+function pricingVisibilityLine(item) {
+  // القراءة مقيّدة بالمالك وحده على مستوى القاعدة (Migration 30): طاقم غير
+  // المالك يحصل على صفوف فارغة صامتة من RLS، فعرض حالة الظهور له كان سيُظهر
+  // "ظاهر للزبائن" خاطئاً لكل صنف. السطر كله للمالك وحده.
+  if (!isOwner()) return "";
+  const merged = Array.isArray(item.sourceKeys) && item.sourceKeys.length > 0;
+  if (merged) return "";
+  const hidden = isItemHidden(item);
+  const guid = normGuid(item.itemGuid);
+  const canEdit = Boolean(guid) && Boolean(dataStore.setItemBulletinVisibility);
+  const statusLine = `<small>النشرة: <b>${hidden ? "مخفي عن الزبائن" : "ظاهر للزبائن"}</b></small>`;
+  const buttons = canEdit
+    ? `<div class="bulletin-visibility-actions">
+        <button class="button mini-button" type="button" data-action="show-bulletin-item" data-item-guid="${escapeHtml(guid)}" data-item-key="${escapeHtml(item.key || "")}" data-item-name="${escapeHtml(item.name || "")}" ${hidden ? "" : "disabled"}>✓ إظهار</button>
+        <button class="button mini-button secondary" type="button" data-action="hide-bulletin-item" data-item-guid="${escapeHtml(guid)}" data-item-key="${escapeHtml(item.key || "")}" data-item-name="${escapeHtml(item.name || "")}" ${hidden ? "disabled" : ""}>✕ إخفاء</button>
+      </div>`
+    : "";
+  return `<div class="bulletin-visibility-line" data-hidden="${hidden ? "true" : "false"}">
+      ${statusLine}
+      ${buttons}
+    </div>`;
+}
+
+async function saveBulletinVisibility(button) {
+  const hidden = button.dataset.action === "hide-bulletin-item";
+  const itemName = button.dataset.itemName || "";
+  try {
+    if (!isOwner()) throw new Error("تعديل ظهور الصنف للمالك فقط.");
+    await dataStore.setItemBulletinVisibility({
+      itemGuid: button.dataset.itemGuid || "",
+      hidden,
+      itemKey: button.dataset.itemKey || "",
+      itemName
+    });
+    await loadBulletinVisibility();
+    setNotice("success", hidden ? `أُخفي «${itemName}» عن نشرة الزبائن. يبقى في المخزون والفواتير كما هو.` : `أُظهر «${itemName}» في نشرة الزبائن.`);
+  } catch (error) {
+    setNotice("error", `تعذّر تعديل الظهور: ${safeErrorMessage(error)}`);
+  }
+  render();
+}
+
+function wazariPricingSection() {
+  const items = wazariPricingWorklistItems();
+  const priced = items.filter((item) => item.hasApprovedPrice || item.unit2Price > 0 || itemRetailPrice(item) > 0).length;
+  const unpriced = items.length - priced;
+  const status = state.bulletinClassificationsStatus;
+  const statusNote = status === "error"
+    ? `<p class="muted">تعذّر تحميل تصحيحات التصنيف المحفوظة (${escapeHtml(state.bulletinClassificationsError || "")})، فالتصنيف الآن حسب الاسم والتصحيحات المؤكدة فقط.</p>`
+    : status === "not_installed" && isOwner()
+      ? '<p class="muted">جدول تصحيحات التصنيف غير مفعّل بعد على قاعدة البيانات (Migration 28)؛ التصحيحات المؤكدة المثبّتة بالكود فعّالة.</p>'
+      : "";
+  const emptyText = dataStore.isConfigured() && !state.session
+    ? "سجل الدخول أولاً حتى تظهر أصناف الوزاري."
+    : "لا توجد أصناف وزاري بمخزون موجب في آخر جرد.";
+  return `
+      <section class="panel wide inventory-browser newsletter-pricing-panel" data-pricing-section="wazari">
+      <div class="panel-title-row inventory-browser-head">
+        <div>
+          <span class="newsletter-section-label">نشرة الوزاري</span>
+          <h3>تسعير أصناف الوزاري</h3>
+          <p class="muted">كل صنف وزاري فعلي بمخزون موجب. السعر المحفوظ هنا يظهر في نشرتي الوزاري (دولار وسوري) فقط، ولا يظهر في النشرة العامة.</p>
+        </div>
+        <span class="status-chip">${escapeHtml(priced)} مسعّر · ${escapeHtml(unpriced)} غير مسعّر</span>
+      </div>
+      ${statusNote}
+      <div class="inventory-list inventory-list-dense pricing-list" data-wazari-pricing-results>
+        ${items.length ? groupedAccordion("pricingWazari", items, { groupOf: (i) => i.groupName, rowOf: (i) => pricingRow(i) }) : `<p class="muted">${escapeHtml(emptyText)}</p>`}
+      </div>
+      </section>`;
 }
 
 // ===== تدقيق النشرة: مواد تحت سعر التكلفة ومواد غير مسعّرة =====
@@ -6163,6 +6651,11 @@ function pricing() {
       : "";
   const generalCount = customerPriceListItems().length;
   const publishState = state.bulletinStatus?.type === "error" ? "تحتاج مراجعة" : "جاهزة للنشر";
+  // القراءة مقيّدة بالمالك وحده على مستوى القاعدة (Migration 30)؛ فلتر وعدادات
+  // الظهور يُعرضان ويُطبَّقان للمالك فقط، وإلا يرى الطاقم عدّاد "0 مخفي" خاطئاً
+  // لأن قراءتهم للجدول تُفلتَر صامتاً بالـRLS بلا أي صنف.
+  const visibilityCounts = isOwner() ? pricingVisibilityCounts(items) : null;
+  const visibleItems = isOwner() ? applyPricingVisibilityFilter(items, state.pricingVisibilityFilter) : items;
 
   return shell(`
     <section class="newsletter-hub">
@@ -6250,19 +6743,26 @@ function pricing() {
       <section class="panel wide inventory-browser newsletter-pricing-panel">
       <div class="panel-title-row inventory-browser-head">
         <div>
-          <span class="newsletter-section-label">مراجعة المواد</span>
-          <h3>أسعار النشرة</h3>
-          <p class="muted">تظهر هنا النشرة العامة فقط بعد استبعاد الوزاري ودمج الأصناف المتشابهة. بعد حفظ الأسعار تُحدّث النشرة تلقائياً خلال لحظات.</p>
+          <span class="newsletter-section-label">النشرة العامة</span>
+          <h3>تسعير الأصناف العامة</h3>
+          <p class="muted">تظهر هنا أصناف النشرة العامة فقط بعد استبعاد الوزاري ودمج الأصناف المتشابهة. أصناف الوزاري لها قسم مستقل أدناه. بعد حفظ الأسعار تُحدّث النشرة تلقائياً خلال لحظات.</p>
         </div>
         <span class="status-chip">${escapeHtml(approvedCount)} سعر معتمد</span>
       </div>
       ${authHint}
       ${state.approvedPriceError ? `<p class="muted">تنبيه الأسعار: ${escapeHtml(state.approvedPriceError)}</p>` : ""}
+      ${isOwner() && state.bulletinVisibilityError ? `<p class="muted">تنبيه الظهور: ${escapeHtml(state.bulletinVisibilityError)} (تبقى كل الأصناف ظاهرة احتياطاً).</p>` : ""}
       <div class="currency-toggle" role="group">
         <button type="button" class="ctgl ${state.priceMode === "mufrak" ? "" : "active"}" data-mode="jumla">عرض أصناف نشرة الجملة</button>
         <button type="button" class="ctgl ${state.priceMode === "mufrak" ? "active" : ""}" data-mode="mufrak">عرض أصناف نشرة المفرق</button>
       </div>
       <p class="pricing-mode-help">اختيار العرض يغيّر الأصناف الظاهرة فقط. كل بطاقة تحفظ سعر الجملة وسعر المفرق كلّاً في حقله المستقل.</p>
+      ${visibilityCounts ? `<div class="currency-toggle" role="group" aria-label="فلتر ظهور الأصناف في نشرة الزبائن">
+        <button type="button" class="ctgl ${state.pricingVisibilityFilter === "all" ? "active" : ""}" data-visibility-filter="all">جميع الأصناف (${escapeHtml(visibilityCounts.total)})</button>
+        <button type="button" class="ctgl ${state.pricingVisibilityFilter === "shown" ? "active" : ""}" data-visibility-filter="shown">الأصناف الظاهرة (${escapeHtml(visibilityCounts.shown)})</button>
+        <button type="button" class="ctgl ${state.pricingVisibilityFilter === "hidden" ? "active" : ""}" data-visibility-filter="hidden">الأصناف المخفية (${escapeHtml(visibilityCounts.hidden)})</button>
+      </div>
+      <p class="pricing-mode-help">الإخفاء يخص نشرة الزبائن فقط (الموقع وPDF والطباعة والواتساب) — الصنف المخفي يبقى في المخزون والفواتير والتقارير دون أي تغيير بسعره أو كميته.</p>` : ""}
       <div class="inventory-controls">
         <label>
           البحث ضمن مواد النشرة
@@ -6270,7 +6770,7 @@ function pricing() {
         </label>
       </div>
       <div class="inventory-list inventory-list-dense pricing-list" data-pricing-results>
-        ${items.length ? groupedAccordion("pricing", items, { groupOf: (i) => i.groupName, rowOf: pricingRow, query: state.pricingSearch }) : `<p class="muted">${escapeHtml(emptyText)}</p>`}
+        ${visibleItems.length ? groupedAccordion("pricing", visibleItems, { groupOf: (i) => i.groupName, rowOf: pricingRow, query: state.pricingSearch }) : `<p class="muted">${escapeHtml(emptyText)}</p>`}
       </div>
       <details class="newsletter-tools">
         <summary>أدوات وتقارير إضافية</summary>
@@ -6286,6 +6786,7 @@ function pricing() {
         </form>
       </details>
       </section>
+      ${wazariPricingSection()}
     </section>
   `);
 }
@@ -8607,6 +9108,24 @@ function optionalDataValue(value) {
   return value !== undefined && value !== null ? escapeHtml(String(value)) : "";
 }
 
+// فواتير البيع الفورية لهذا الزبون التي لم يصل قيدها إلى دفتر حسابه بعد.
+//
+// قائمة «الفواتير» في البطاقة مبنية من دفتر الحركات (يُرفع كل بضع دقائق)، بينما تصل
+// الفاتورة نفسها من وكيل الأحداث خلال ثوانٍ (2026-11-05: فاتورة 1195 وصلت بثانيتين
+// وتغيّر الرصيد، ولم تظهر في البطاقة). تُعرض هنا بلا زر مستند — مستند الفاتورة يحتاج
+// رصيدَي قيدها في الدفتر — وتختفي من هذه القائمة متى ربطها bindSaleInvoiceLedger بقيدها.
+// فقط ما يقول الربط عنه صراحةً «لا قيد يطابقها» (missing-movement)؛ الالتباس لا يُعرض.
+// والفاتورة إمّا فورية، أو بتاريخ اليوم/أمس: النسخة الفورية تُستبدل بنسخة التقرير بعد
+// دقائق، وقد يسبق تقريرُ الفواتير دفترَ الحركات. ولا شيء خارج نافذة الدفتر نفسه.
+function customerPendingLiveInvoices(item, movements) {
+  if (!item) return [];
+  const sales = customerInvoicesFor(item).filter((inv) => inv && !inv.isReturn);
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  return sales.filter((inv) => (inv.live === true || String(inv.date || "") >= yesterday)
+    && movementsReportCovers(inv.date)
+    && bindSaleInvoiceLedger({ movements, invoices: sales, invoice: inv }).reason === "missing-movement");
+}
+
 function customerDetailsPanel(item) {
   if (!item) {
     return `
@@ -8636,6 +9155,8 @@ function customerDetailsPanel(item) {
   const typedLedger = fromFullLedger && movementsReportHasLineKinds();
   // سطر مدين من قيد مرتجع، أو payment_out، ليس فاتورة بيع.
   const invoiceMoves = movements.filter((m) => debitMovementKind(m, typedLedger).kind === "sale");
+  // فواتير البيع الفورية (وصلت من وكيل الأحداث خلال ثوانٍ) ولم يصل قيدها إلى الدفتر بعد.
+  const pendingLive = customerPendingLiveInvoices(item, movements);
   const creditMoves = movements.filter((m) => Number(m?.credit || 0) > 0);
   // مرتجع المبيعات يُقيَّد دائناً على حساب الزبون تماماً كالدفعة — نفرزه بربطه القطعي
   // بفاتورة المرتجع (creditMovementKind)، لا بالتاريخ والمبلغ. ما لا يجوز الحكم عليه
@@ -8694,9 +9215,18 @@ function customerDetailsPanel(item) {
         <article>
           <div class="detail-section-head">
             <h4>🧾 الفواتير</h4>
-            <span class="status-chip">${invoiceMoves.length} فاتورة</span>
+            <span class="status-chip">${invoiceMoves.length + pendingLive.length} فاتورة</span>
           </div>
           <div class="detail-list payment-timeline">
+            ${pendingLive.map((inv) => `
+                <div class="payment-entry" data-live-pending-invoice="${escapeHtml(String(inv.guid || ""))}">
+                  <div class="payment-entry-dot movement-dot"></div>
+                  <div class="payment-entry-body">
+                    <strong class="payment-amount">فاتورة ${escapeHtml(String(inv.number || ""))}: ${escapeHtml(formatMoney(Number(inv.total || 0)))}</strong>
+                    <span class="payment-date">${escapeHtml(inv.date ? formatDate(inv.date) : "بلا تاريخ")}</span>
+                    <small class="payment-note">⚡ وصلت من الأمين للتو. قيدها بدفتر الحساب يصل خلال دقائق، وبعدها يظهر زر PDF.</small>
+                  </div>
+                </div>`).join("")}
             ${invoiceMoves.length
               ? invoiceMoves.map((m) => `
                 <div class="payment-entry">
@@ -8709,7 +9239,7 @@ function customerDetailsPanel(item) {
                     <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="${escapeHtml(String(m?.debit || 0))}" data-credit="0" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}" style="margin-top:6px">📄 فاتورة PDF</button>
                   </div>
                 </div>`).join("")
-              : '<p class="muted" style="padding:12px 0">لا توجد فواتير مسجلة.</p>'}
+              : (pendingLive.length ? "" : '<p class="muted" style="padding:12px 0">لا توجد فواتير مسجلة.</p>')}
           </div>
         </article>
         <article>
@@ -10164,6 +10694,11 @@ function salesInvoice() {
   // شاشة الفواتير السابقة تُعرض قبل أي حساب للفاتورة الحالية: لا نستدعي
   // ensureSalesInvoiceNo هنا كي لا يُحجز أو يُستهلك رقم لمجرد تصفّح الأرشيف.
   if (state.salesHistoryOpen) return shell(salesHistoryPanel());
+  const priceRequests = window.OzkSalesPriceRequests;
+  if (priceRequests?.isOpen()) return shell(priceRequests.panel(salesPriceRequestsCtx()));
+  // فاتورة حساب غير المالك (المحاسب) لا تُحفظ مباشرة: تُرسل لتسعير المالك ثم تُدخل
+  // يدوياً في الأمين. فاتورة المالك من حسابه تبقى كما كانت (طلب عمر 2026-11-05).
+  const needsPricing = salesNeedsOwnerPricing();
 
   const mode = salesCurrentMode();
   const symbol = salesCurrencySymbol(mode);
@@ -10198,7 +10733,7 @@ function salesInvoice() {
         <input class="inv-input sales-search" data-sales-field="q" data-sales-index="${i}" value="${escapeHtml(row.q)}" placeholder="رقم الصنف أو الاسم" dir="auto" autocomplete="off">
         <div class="sales-suggest" data-sales-suggest="${i}"></div>
       </td>
-      <td class="sales-cell-name">${resolved ? `<strong>${escapeHtml(computed.item.itemName)}</strong>${salesItemCode(computed.item) ? `<small class="muted" dir="ltr"> #${escapeHtml(salesItemCode(computed.item))}</small>` : ""}<button type="button" class="sales-info-btn" data-sales-info="${escapeHtml(computed.item.itemKey)}" title="معلومات الصنف: المخزون والتكلفة والربح والمستودعات">i</button>` : '<span class="muted">—</span>'}</td>
+      <td class="sales-cell-name">${resolved ? `<strong>${escapeHtml(computed.item.itemName)}</strong>${salesItemCode(computed.item) ? `<small class="muted" dir="ltr"> #${escapeHtml(salesItemCode(computed.item))}</small>` : ""}<button type="button" class="sales-info-btn" data-sales-info="${escapeHtml(computed.item.itemKey)}" title="معلومات الصنف: المخزون والتكلفة والربح والمستودعات">i</button>${salesRowStockHtml(computed.item, row)}` : '<span class="muted">—</span>'}</td>
       <td class="sales-cell-unit">
         <button type="button" class="sales-unit-toggle" data-sales-unit="${i}" ${resolved ? "" : "disabled"} title="${resolved ? `تبديل إلى ${escapeHtml(otherLabel)}` : "اختر صنفاً أولاً"}">${escapeHtml(unitLabel)}</button>
       </td>
@@ -10217,6 +10752,7 @@ function salesInvoice() {
       <div class="inv-form-area">
         <div class="sales-toolbar">
           <button type="button" class="sales-mode-btn" data-action="sales-history-open" title="عرض الفواتير السابقة من الأمين">↩ الفواتير السابقة</button>
+          ${priceRequests ? priceRequests.toolbarButton(salesPriceRequestsCtx()) : ""}
           <div class="sales-mode-switch" role="group" aria-label="وضع التسعير">
             <button type="button" class="sales-mode-btn ${mode === "jumla" ? "active" : ""}" data-sales-mode="jumla">جملة · دولار</button>
             <button type="button" class="sales-mode-btn ${mode === "mufrak" ? "active" : ""}" data-sales-mode="mufrak">مفرق · سوري</button>
@@ -10226,8 +10762,8 @@ function salesInvoice() {
 
         <div class="sales-header-grid">
           <label class="inv-label">رقم الفاتورة
-            <input class="inv-input-main" value="${escapeHtml(invNo || "—")}" readonly dir="ltr">
-            <small class="muted sales-inv-no-hint">${escapeHtml(salesInvoiceNoHint())}</small>
+            <input class="inv-input-main" value="${escapeHtml(needsPricing ? "—" : (invNo || "—"))}" readonly dir="ltr">
+            <small class="muted sales-inv-no-hint">${escapeHtml(needsPricing ? "الرقم يُعطى في الأمين بعد التسعير" : salesInvoiceNoHint())}</small>
           </label>
           <label class="inv-label">التاريخ
             <input class="inv-input-main" value="${escapeHtml(todayIsoDate())}" readonly dir="ltr">
@@ -10245,6 +10781,7 @@ function salesInvoice() {
         </div>
 
         ${priceLoaded ? "" : '<p class="muted sales-hint">لم تُحمّل لائحة الأسعار بعد — لن تظهر اقتراحات المواد حتى تُحمّل.</p>'}
+        ${needsPricing ? '<p class="spr-hint">هذه الفاتورة تُرسل لتسعير المالك ولا تُحفظ في الأمين. بعد أن تصير «مسعّرة» أدخلها في الأمين بأسعارها.</p>' : ""}
 
         <div class="inv-table-wrap">
           <table class="inv-table sales-table">
@@ -10278,9 +10815,11 @@ function salesInvoice() {
         <div data-sales-cust-host>${salesCustomerPanel()}</div>
 
         <div class="inv-actions sales-actions">
-          <button class="button primary" data-action="sales-save">💾 حفظ الفاتورة</button>
+          ${needsPricing
+            ? '<button class="button primary" data-action="sales-submit-pricing">📨 إرسال للتسعير</button>'
+            : `<button class="button primary" data-action="sales-save">💾 حفظ الفاتورة</button>
           ${mode === "jumla" ? '<button class="button secondary" data-action="sales-pdf">📄 حفظ / مشاركة PDF</button>' : ""}
-          ${isHandheldDevice() ? "" : `<button class="button secondary" data-action="sales-print">🖨 ${mode === "mufrak" ? "طباعة فاتورة كاشير" : "طباعة"}</button>`}
+          ${isHandheldDevice() ? "" : `<button class="button secondary" data-action="sales-print">🖨 ${mode === "mufrak" ? "طباعة فاتورة كاشير" : "طباعة"}</button>`}`}
           <button class="button secondary" data-action="sales-new">＋ فاتورة جديدة</button>
         </div>
       </div>
@@ -10432,12 +10971,138 @@ function salesNewInvoice() {
   render();
 }
 
+// ── فواتير بانتظار تسعير المالك (src/sales-price-requests.js) ─────────────────
+function salesNeedsOwnerPricing() {
+  return !isOwner() && !!window.OzkSalesPriceRequests?.needsOwnerPricing(state.session);
+}
+
+// المتوفر بالمستودعات من تقرير ameen_item_details (الكمية فيه بالوحدة الأولى/الكروز،
+// ومستودع الامانة مستبعد أصلاً في المصدر). null = لا تقرير أو الصنف غير موجود فيه.
+function salesStoresAvailableUnit1(item) {
+  const details = salesDetailsFor(item);
+  if (!details || !Array.isArray(details.stores)) return null;
+  return details.stores.reduce((t, s) => t + Number(s.qty || 0), 0);
+}
+
+function salesFmtStockQty(item, q) {
+  const factor = salesUnit2Factor(item);
+  const abs = Math.abs(q);
+  const c = Math.floor(abs / factor);
+  const l = Math.round((abs - c * factor) * 100) / 100;
+  const parts = [];
+  if (c > 0) parts.push(`${c} ${salesUnitLabel(item, "unit2")}`);
+  if (l > 0) parts.push(`${l} ${salesUnitLabel(item, "unit1")}`);
+  if (!parts.length) parts.push(`0 ${salesUnitLabel(item, "unit2")}`);
+  return `${q < 0 ? "− " : ""}${parts.join(" + ")}`;
+}
+
+// سطر المخزون تحت اسم الصنف: المجموع ثم كل مستودع، وتحذير إن كانت الكمية المطلوبة أكبر.
+function salesStockSummary(item, unitKey, qty) {
+  if (!item) return null;
+  const available = salesStoresAvailableUnit1(item);
+  if (available === null) {
+    return { short: false, text: state.itemDetails ? "المخزون: غير موجود في تقرير المستودعات" : "المخزون: جاري التحميل…" };
+  }
+  const requested = toNumber(qty) * (unitKey === "unit2" ? salesUnit2Factor(item) : 1);
+  const check = window.OzkSalesPriceRequests?.stockCheck(requested, available) || { level: "ok" };
+  const stores = (salesDetailsFor(item).stores || []).filter((s) => Number(s.qty) !== 0)
+    .map((s) => `${s.name}: ${salesFmtStockQty(item, Number(s.qty))}`);
+  const text = `المتوفر ${salesFmtStockQty(item, available)}${stores.length > 1 ? ` (${stores.join("، ")})` : stores.length ? ` (${stores[0]})` : ""}${check.level === "short" ? " — أقل من المطلوب" : ""}`;
+  return { short: check.level === "short", text };
+}
+
+function salesRowStockHtml(item, row) {
+  const s = salesStockSummary(item, row.unit, row.qty);
+  if (!s) return "";
+  return `<small class="spr-stock ${s.short ? "is-short" : ""}">${escapeHtml(s.text)}</small>`;
+}
+
+// تقرير المستودعات يُحمَّل مرة واحدة عند فتح الصفحة كي يظهر المخزون في كل سطر.
+function salesEnsureStockDetails() {
+  if (state.itemDetails || state.salesStockDetailsRequested) return;
+  state.salesStockDetailsRequested = true;
+  loadItemDetails().then(() => { if (state.itemDetails && state.route === "sales" && !isEditingFormField()) render(); });
+}
+
+function salesPriceRequestsCtx() {
+  return {
+    dataStore,
+    render,
+    setNotice,
+    safeErrorMessage,
+    escapeHtml,
+    toNumber,
+    formatDateTime,
+    isOwner,
+    session: () => state.session,
+    route: () => state.route,
+    money: (value, mode) => salesMoney(value, mode),
+    fmtPlain: (value, mode) => salesFmtPlain(value, mode),
+    stockForLine: (line) => salesStockSummary(salesItemByKey(line.key), line.unitKey, line.qty),
+    // تكلفة وحدة السطر للمالك وحده (item_costs محمي بـRLS؛ غير المالك يرجع 0).
+    costForLine: (line) => {
+      const item = salesItemByKey(line.key);
+      const unitCost = salesUnitCost(item).value;
+      if (!(unitCost > 0)) return 0;
+      return line.unitKey === "unit2" ? unitCost * salesUnit2Factor(item) : unitCost;
+    }
+  };
+}
+
+async function salesSubmitForPricing() {
+  if (state.salesSaving) return;
+  const mode = salesCurrentMode();
+  // السعر ليس شرطاً هنا: المالك يسعّر. الصنف والكمية فقط.
+  const rows = (state.salesRows || []).filter((row) => row.key && toNumber(row.qty) > 0);
+  if (!rows.length) {
+    setNotice("error", "أضف صنفاً واحداً على الأقل بكمية أكبر من صفر.");
+    render();
+    return;
+  }
+  state.salesSaving = true;
+  const btn = document.querySelector("[data-action='sales-submit-pricing']");
+  if (btn) btn.disabled = true;
+  try {
+    const lines = rows.map((row) => {
+      const item = salesItemByKey(row.key);
+      return {
+        key: row.key,
+        num: salesItemCode(item) || row.num || "",
+        name: item?.itemName || row.name || "",
+        unit: salesUnitLabel(item, row.unit),
+        unitKey: row.unit,
+        qty: toNumber(row.qty),
+        price: Math.max(0, toNumber(row.price))
+      };
+    });
+    const result = await window.OzkSalesPriceRequests.submit(salesPriceRequestsCtx(), {
+      mode,
+      customerName: state.salesCustomer.trim(),
+      payMethod: state.salesPayMethod,
+      rate: mode === "mufrak" ? Number(state.syriaExchangeRate) || null : null,
+      lines
+    });
+    state.salesRows = [salesEmptyRow()];
+    state.salesCustomer = "";
+    state.salesDiscount = "";
+    state.salesPaid = "";
+    setNotice("success", `أُرسلت الفاتورة #${result?.id ?? ""} للتسعير ✓ — لا تُدخلها في الأمين حتى تصير «مسعّرة».`);
+  } catch (error) {
+    setNotice("error", "تعذّر الإرسال للتسعير: " + (error?.message || safeErrorMessage(error)));
+  } finally {
+    state.salesSaving = false;
+    render();
+  }
+}
+
 async function salesSaveInvoice() {
   // نقرة ثانية أثناء تنفيذ الحفظ. هذا الفحص أولاً وقبل أي شيء، ورفعُ القفل بعده
   // مباشرةً وقبل أي await: عندما كان القفل يُرفع قبل الكتابة فقط، كانت النقرة
   // الثانية تمرّ أثناء جلب المزامنة فيُحفظ مستندان بالرقم نفسه (مانع أكّدته
   // المراجعة). كل خروج بعد هذه النقطة يمرّ عبر finally الذي يخفض القفل.
   if (state.salesSaving) return;
+  // حساب المحاسب لا يحفظ مباشرة ولو استُدعيت الدالة من غير زرها: الفاتورة تمرّ بتسعير المالك.
+  if (salesNeedsOwnerPricing()) return salesSubmitForPricing();
 
   if (!salesResolvedRows().length) {
     setNotice("error", "أضف صنفاً واحداً على الأقل بكمية وسعر أكبر من صفر.");
@@ -12945,7 +13610,32 @@ function bindCustomerDetailButtons(root = app) {
   });
 }
 
+function bindBulletinClassificationForms(root = app) {
+  root.querySelectorAll("[data-form='bulletin-classification']").forEach((form) => {
+    if (form.dataset.bound === "true") return;
+    form.dataset.bound = "true";
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveBulletinClassification(event.currentTarget);
+    });
+  });
+}
+
+// أزرار الإظهار/الإخفاء ليست نموذجاً — زر فوري بلا حقول، كأزرار refresh-ameen
+// المفردة؛ لا مُرسِل تفويض واحد في الملف، فنطابق نفس نمط الربط لكل صنف.
+function bindBulletinVisibilityButtons(root = app) {
+  root.querySelectorAll("[data-action='show-bulletin-item'], [data-action='hide-bulletin-item']").forEach((button) => {
+    if (button.dataset.bound === "true") return;
+    button.dataset.bound = "true";
+    button.addEventListener("click", (event) => {
+      saveBulletinVisibility(event.currentTarget);
+    });
+  });
+}
+
 function bindPricingForms(root = app) {
+  bindBulletinClassificationForms(root);
+  bindBulletinVisibilityButtons(root);
   root.querySelectorAll("[data-form='pricing-item']").forEach((form) => {
     if (form.dataset.bound === "true") return;
     form.dataset.bound = "true";
@@ -12981,7 +13671,8 @@ function bindPricingForms(root = app) {
 
 // تحديث قائمة نتائج التسعير فقط (دون إعادة رسم الصفحة) حتى لا يضيع التركيز أثناء البحث
 function updatePricingResults() {
-  const items = generalPricingWorklistItems();
+  const base = generalPricingWorklistItems();
+  const items = isOwner() ? applyPricingVisibilityFilter(base, state.pricingVisibilityFilter) : base;
   const results = app.querySelector("[data-pricing-results]");
   if (!results) return;
   results.innerHTML = items.length
@@ -13022,6 +13713,137 @@ function bindAccordions(root = app) {
       const pg = d.dataset.acc, key = d.dataset.accKey;
       const set = state.openSections[pg] || (state.openSections[pg] = new Set());
       if (d.open) set.add(key); else set.delete(key);
+    });
+  });
+}
+
+// أزرار مستندات قيود الدفتر (فاتورة/مرتجع/سند قبض/صرف) في بطاقة تفاصيل الزبون. دالة
+// مستقلة كي تُربط أيضاً بعد التحديث الجزئي للبطاقة (refreshCustomerDetailPanelData).
+// المعامل اسمه `app` عمداً (جذر البحث، يحجب العام): حرّاس check-invoice-ledger-binding
+// وcheck-payment-out-not-invoice يستخرجون المعالج الحقيقي بنصّه هذا ويشغّلونه.
+function bindMovementDocButtons(app) {
+  app.querySelectorAll("[data-action='gen-movement-doc']").forEach((el) => {
+    el.addEventListener("click", () => {
+      // نقرة ثانية أثناء تجهيز المستند تُتجاهَل: وإلا صدر سندان برقمين مختلفين
+      // للدفعة نفسها. الحارس على مستوى الوحدة كي يصمد أمام إعادة رسم الصفحة.
+      if (voucherExportBusy) return;
+      voucherExportBusy = true;
+      setTimeout(() => { voucherExportBusy = false; }, 1500);
+      const item = selectedCustomer(latestCustomerBalanceItems());
+      if (!item) { showNoticeNow("error", "اختر زبونًا أولاً."); return; }
+      const debit = Number(el.dataset.debit || 0);
+      const credit = Number(el.dataset.credit || 0);
+      const key = customerKey(item);
+      const base = {
+        name: item.name || "",
+        phone: customerProfile(key)?.phone || "",
+        date: el.dataset.date || todayIsoDate(),
+        notes: el.dataset.notes || "",
+        cur: customerCurrency(item)
+      };
+      // الرصيد المُخزَّن من دفتر الأمين لهذا القيد بالذات — ممرَّر مع الزر، بلا أي مطابقة.
+      const storedBal = el.dataset.balance !== undefined && el.dataset.balance !== ""
+        ? Number(el.dataset.balance) : null;
+      // الرصيد الزمني الحقيقي للمستند (لا يتضخّم بدفعة نفس اليوم). يسقط لرصيد الكشف إن غاب.
+      const storedBalChrono = el.dataset.balanceChrono !== undefined && el.dataset.balanceChrono !== ""
+        ? Number(el.dataset.balanceChrono) : storedBal;
+      const docBal = (storedBalChrono !== null && Number.isFinite(storedBalChrono)) ? storedBalChrono : storedBal;
+      // رصيدا المستند بعد/قبل سند القيد كاملاً (يشملان الخصم المرافق). يسقطان إلى الرصيد الزمني.
+      const storedDocNew = el.dataset.docNew !== undefined && el.dataset.docNew !== ""
+        ? Number(el.dataset.docNew) : docBal;
+      const storedDocPrev = el.dataset.docPrev !== undefined && el.dataset.docPrev !== ""
+        ? Number(el.dataset.docPrev) : null;
+      if (debit > 0 && credit <= 0) {
+        // سطر حسم المرتجع ليس فاتورة. payment_out صرف من الصندوق: سند صرف، بلا بحث عن أصناف.
+        if (movementReturnLink({ billGuid: el.dataset.billGuid })) {
+          showNoticeNow("error", "هذا السطر جزء من قيد مرتجع (حسم المرتجع)، وليس فاتورة بيع — صدّره من قائمة المرتجعات.");
+          return;
+        }
+        if (movementDocTypeFromButton(el.dataset.lineKind, debit, credit) === "payment") {
+          exportMovementReceipt(base, item, debit, storedDocNew, "payment");
+          return;
+        }
+        // الزبون يُمرَّر كعنصر (يحمل customerGuid) لا كاسم — الاسم في تقرير الفواتير
+        // مصدره حقل نصّي آخر في الأمين وقد يتخلّف عن اسم الحساب بعد أي تعديل.
+        const invs = customerInvoicesFor(item).filter((x) => !x.isReturn);
+        // سطر الدفتر الذي ضُغط زرّه، من نفس المصدر الذي رُسمت منه القائمة.
+        const ledgerRows = customerFullMovements(item)?.movements || item.recentMovements || [];
+        const dOnly = String(el.dataset.date || "").slice(0, 10);
+        const sameDoc = (v, raw) => raw === undefined || raw === "" || Number(v) === Number(raw);
+        const clicked = ledgerRows.find((m) => Number(m?.debit || 0) > 0 && !(Number(m?.credit || 0) > 0)
+          && String(m?.date || "").slice(0, 10) === dOnly && saleAmountsEqual(m.debit, debit)
+          && sameDoc(m.docPrev, el.dataset.docPrev) && sameDoc(m.docNew, el.dataset.docNew)) || null;
+        // معرّف الفاتورة (قطعي) على كامل التقرير أولاً، ثم تطابق واحد لواحد بنفس اليوم
+        // والمبلغ — ولا شيء غير ذلك: لا تاريخ وحده، ولا مبلغ وحده، ولا ترتيب النتائج.
+        const bg = normGuid(el.dataset.billGuid);
+        const byGuid = bg ? invoiceByGuid(bg) : null;
+        const binding = clicked
+          ? bindSaleInvoiceLedger({
+            movements: ledgerRows,
+            invoices: invs,
+            invoice: byGuid && !byGuid.invoice.isReturn ? byGuid.invoice : null,
+            movement: clicked
+          })
+          : { reason: "missing-movement" };
+        const match = binding.invoice || null;
+        if (!match) {
+          showNoticeNow("error", saleBindingRefusal(binding.reason, debit, dOnly, item));
+          return;
+        }
+        const total = match.total || debit;
+        const opts = { ...base, cur: "$", type: "invoice", amount: total, no: match.number ? String(match.number) : docNumber("INV"), lines: match.lines || [] };
+        if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
+          opts.newBalance = roundPrice(storedDocNew);
+          const prev = (storedDocPrev !== null && Number.isFinite(storedDocPrev)) ? storedDocPrev : (storedDocNew - debit);
+          opts.prevBalance = roundPrice(prev);
+          // الحسم ودفعة الزبون يأتيان من الأمين على رأس الفاتورة (TotalDisc وFirstPay)
+          // ويُنسبان أولاً. ما يتبقّى بعدهما لا يُسمّى حسماً أبداً، ولا يُطبع إلا إذا
+          // أثبتته أسطر حقيقية في قيد الفاتورة نفسه — وإلا لا مستند.
+          const knownDiscount = Math.max(0, roundPrice(Number(match.discount || 0)));
+          const knownPayment = Math.max(0, roundPrice(Number(match.payment || 0)));
+          if (knownDiscount > 0.009) opts.discount = knownDiscount;
+          if (knownPayment > 0.009) opts.payment = knownPayment;
+          const residual = roundPrice(
+            opts.prevBalance + total - knownDiscount - knownPayment - opts.newBalance
+          );
+          if (!invoiceEntryProvesResidual(ledgerRows, binding.movement, residual)) {
+            showNoticeNow("error", saleBindingRefusal("residual", debit, dOnly, item));
+            return;
+          }
+          if (Math.abs(residual) > 0.009) opts.adjust = residual;
+        } else {
+          // قيد الحركة بلا أرصدة مخزَّنة (تقرير أقدم من تحديث المزامنة):
+          // نفس قاعدة مسار الفواتير — رصيد الحساب مستقلاً وموسوماً متى كان
+          // الدفتر يغطّي التاريخ، ولا شيء إطلاقاً متى لم يكن.
+          const account = customerBalance(item);
+          if (movementsReportCovers(el.dataset.date) && Number.isFinite(account)) {
+            opts.accountBalance = roundPrice(account);
+            opts.accountBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
+          }
+        }
+        exportVoucherPdf(opts);
+      } else if (credit > 0) {
+        // مرتجع المبيعات يُقيَّد دائناً كالدفعة تماماً — يُعرف بربطه القطعي بفاتورة المرتجع
+        // (creditMovementKind) لا بالتاريخ والمبلغ، ويُصدَّر بأصنافه وأرصدة قيده هو.
+        const kind = creditMovementKind(item, { date: el.dataset.date, credit, billGuid: el.dataset.billGuid, docPrev: el.dataset.docPrev, docNew: el.dataset.docNew }, el.dataset.ledgerLinked === "1");
+        if (kind.kind === "return") {
+          const retMatch = kind.invoice;
+          const opts = { ...base, cur: "$", type: "return", amount: retMatch.total || credit, no: retMatch.number ? String(retMatch.number) : docNumber("RET"), lines: retMatch.lines || [] };
+          // أرصدة القيد المخزَّنة وحدها — لا الرصيد الحالي أبداً.
+          applyReturnLedger(opts, retMatch, el.dataset.docPrev, el.dataset.docNew);
+          exportVoucherPdf(opts);
+        } else if (kind.kind !== "receipt") {
+          showNoticeNow("error", kind.kind === "invoice-discount"
+            ? "هذا السطر حسم على الفاتورة " + (kind.invoice?.number || "") + " وليس سند قبض — صدّر الفاتورة نفسها."
+            : kind.kind === "return-pending"
+            ? "هذا القيد مرتجع مبيعات، وتفاصيله لم تُزامَن بعد — لا مستند له حتى المزامنة التالية."
+            : "لا يمكن الحكم على هذا القيد: يطابق مرتجعاً ولا ربط قطعياً له — لم يُطبع سند قبض ولا مرتجع.");
+        } else {
+          exportMovementReceipt(base, item, credit, storedDocNew);
+        }
+      } else {
+        showNoticeNow("error", "لا يمكن تصدير هذا القيد.");
+      }
     });
   });
 }
@@ -13176,6 +13998,13 @@ function render() {
       event.preventDefault();
       setRoute(button.dataset.route);
     });
+  });
+
+  // مدخل «فواتير التسعير» في قائمة التنقل: setRoute يغلق اللوحة، فتُفتح بعده.
+  app.querySelector("[data-action='spr-nav-open']")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    setRoute("sales");
+    if (state.route === "sales") window.OzkSalesPriceRequests?.openPanel(salesPriceRequestsCtx());
   });
 
   app.querySelectorAll("[data-task]").forEach((button) => {
@@ -13675,6 +14504,12 @@ function render() {
     });
   });
   app.querySelector("[data-action='sales-save']")?.addEventListener("click", salesSaveInvoice);
+  app.querySelector("[data-action='sales-submit-pricing']")?.addEventListener("click", salesSubmitForPricing);
+  if (state.route === "sales" && state.session) {
+    window.OzkSalesPriceRequests?.bind(app, salesPriceRequestsCtx());
+    window.OzkSalesPriceRequests?.ensureLoaded(salesPriceRequestsCtx());
+    salesEnsureStockDetails();
+  }
   app.querySelector("[data-action='sales-print']")?.addEventListener("click", printSalesInvoice);
   app.querySelector("[data-action='sales-pdf']")?.addEventListener("click", saveSalesInvoicePdf);
   app.querySelector("[data-action='sales-new']")?.addEventListener("click", salesNewInvoice);
@@ -13812,130 +14647,7 @@ function render() {
     setNotice("success", `عملة الزبون الآن: ${next}`);
     render();
   });
-  app.querySelectorAll("[data-action='gen-movement-doc']").forEach((el) => {
-    el.addEventListener("click", () => {
-      // نقرة ثانية أثناء تجهيز المستند تُتجاهَل: وإلا صدر سندان برقمين مختلفين
-      // للدفعة نفسها. الحارس على مستوى الوحدة كي يصمد أمام إعادة رسم الصفحة.
-      if (voucherExportBusy) return;
-      voucherExportBusy = true;
-      setTimeout(() => { voucherExportBusy = false; }, 1500);
-      const item = selectedCustomer(latestCustomerBalanceItems());
-      if (!item) { showNoticeNow("error", "اختر زبونًا أولاً."); return; }
-      const debit = Number(el.dataset.debit || 0);
-      const credit = Number(el.dataset.credit || 0);
-      const key = customerKey(item);
-      const base = {
-        name: item.name || "",
-        phone: customerProfile(key)?.phone || "",
-        date: el.dataset.date || todayIsoDate(),
-        notes: el.dataset.notes || "",
-        cur: customerCurrency(item)
-      };
-      // الرصيد المُخزَّن من دفتر الأمين لهذا القيد بالذات — ممرَّر مع الزر، بلا أي مطابقة.
-      const storedBal = el.dataset.balance !== undefined && el.dataset.balance !== ""
-        ? Number(el.dataset.balance) : null;
-      // الرصيد الزمني الحقيقي للمستند (لا يتضخّم بدفعة نفس اليوم). يسقط لرصيد الكشف إن غاب.
-      const storedBalChrono = el.dataset.balanceChrono !== undefined && el.dataset.balanceChrono !== ""
-        ? Number(el.dataset.balanceChrono) : storedBal;
-      const docBal = (storedBalChrono !== null && Number.isFinite(storedBalChrono)) ? storedBalChrono : storedBal;
-      // رصيدا المستند بعد/قبل سند القيد كاملاً (يشملان الخصم المرافق). يسقطان إلى الرصيد الزمني.
-      const storedDocNew = el.dataset.docNew !== undefined && el.dataset.docNew !== ""
-        ? Number(el.dataset.docNew) : docBal;
-      const storedDocPrev = el.dataset.docPrev !== undefined && el.dataset.docPrev !== ""
-        ? Number(el.dataset.docPrev) : null;
-      if (debit > 0 && credit <= 0) {
-        // سطر حسم المرتجع ليس فاتورة. payment_out صرف من الصندوق: سند صرف، بلا بحث عن أصناف.
-        if (movementReturnLink({ billGuid: el.dataset.billGuid })) {
-          showNoticeNow("error", "هذا السطر جزء من قيد مرتجع (حسم المرتجع)، وليس فاتورة بيع — صدّره من قائمة المرتجعات.");
-          return;
-        }
-        if (movementDocTypeFromButton(el.dataset.lineKind, debit, credit) === "payment") {
-          exportMovementReceipt(base, item, debit, storedDocNew, "payment");
-          return;
-        }
-        // الزبون يُمرَّر كعنصر (يحمل customerGuid) لا كاسم — الاسم في تقرير الفواتير
-        // مصدره حقل نصّي آخر في الأمين وقد يتخلّف عن اسم الحساب بعد أي تعديل.
-        const invs = customerInvoicesFor(item).filter((x) => !x.isReturn);
-        // سطر الدفتر الذي ضُغط زرّه، من نفس المصدر الذي رُسمت منه القائمة.
-        const ledgerRows = customerFullMovements(item)?.movements || item.recentMovements || [];
-        const dOnly = String(el.dataset.date || "").slice(0, 10);
-        const sameDoc = (v, raw) => raw === undefined || raw === "" || Number(v) === Number(raw);
-        const clicked = ledgerRows.find((m) => Number(m?.debit || 0) > 0 && !(Number(m?.credit || 0) > 0)
-          && String(m?.date || "").slice(0, 10) === dOnly && saleAmountsEqual(m.debit, debit)
-          && sameDoc(m.docPrev, el.dataset.docPrev) && sameDoc(m.docNew, el.dataset.docNew)) || null;
-        // معرّف الفاتورة (قطعي) على كامل التقرير أولاً، ثم تطابق واحد لواحد بنفس اليوم
-        // والمبلغ — ولا شيء غير ذلك: لا تاريخ وحده، ولا مبلغ وحده، ولا ترتيب النتائج.
-        const bg = normGuid(el.dataset.billGuid);
-        const byGuid = bg ? invoiceByGuid(bg) : null;
-        const binding = clicked
-          ? bindSaleInvoiceLedger({
-            movements: ledgerRows,
-            invoices: invs,
-            invoice: byGuid && !byGuid.invoice.isReturn ? byGuid.invoice : null,
-            movement: clicked
-          })
-          : { reason: "missing-movement" };
-        const match = binding.invoice || null;
-        if (!match) {
-          showNoticeNow("error", saleBindingRefusal(binding.reason, debit, dOnly, item));
-          return;
-        }
-        const total = match.total || debit;
-        const opts = { ...base, cur: "$", type: "invoice", amount: total, no: match.number ? String(match.number) : docNumber("INV"), lines: match.lines || [] };
-        if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
-          opts.newBalance = roundPrice(storedDocNew);
-          const prev = (storedDocPrev !== null && Number.isFinite(storedDocPrev)) ? storedDocPrev : (storedDocNew - debit);
-          opts.prevBalance = roundPrice(prev);
-          // الحسم ودفعة الزبون يأتيان من الأمين على رأس الفاتورة (TotalDisc وFirstPay)
-          // ويُنسبان أولاً. ما يتبقّى بعدهما لا يُسمّى حسماً أبداً، ولا يُطبع إلا إذا
-          // أثبتته أسطر حقيقية في قيد الفاتورة نفسه — وإلا لا مستند.
-          const knownDiscount = Math.max(0, roundPrice(Number(match.discount || 0)));
-          const knownPayment = Math.max(0, roundPrice(Number(match.payment || 0)));
-          if (knownDiscount > 0.009) opts.discount = knownDiscount;
-          if (knownPayment > 0.009) opts.payment = knownPayment;
-          const residual = roundPrice(
-            opts.prevBalance + total - knownDiscount - knownPayment - opts.newBalance
-          );
-          if (!invoiceEntryProvesResidual(ledgerRows, binding.movement, residual)) {
-            showNoticeNow("error", saleBindingRefusal("residual", debit, dOnly, item));
-            return;
-          }
-          if (Math.abs(residual) > 0.009) opts.adjust = residual;
-        } else {
-          // قيد الحركة بلا أرصدة مخزَّنة (تقرير أقدم من تحديث المزامنة):
-          // نفس قاعدة مسار الفواتير — رصيد الحساب مستقلاً وموسوماً متى كان
-          // الدفتر يغطّي التاريخ، ولا شيء إطلاقاً متى لم يكن.
-          const account = customerBalance(item);
-          if (movementsReportCovers(el.dataset.date) && Number.isFinite(account)) {
-            opts.accountBalance = roundPrice(account);
-            opts.accountBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
-          }
-        }
-        exportVoucherPdf(opts);
-      } else if (credit > 0) {
-        // مرتجع المبيعات يُقيَّد دائناً كالدفعة تماماً — يُعرف بربطه القطعي بفاتورة المرتجع
-        // (creditMovementKind) لا بالتاريخ والمبلغ، ويُصدَّر بأصنافه وأرصدة قيده هو.
-        const kind = creditMovementKind(item, { date: el.dataset.date, credit, billGuid: el.dataset.billGuid, docPrev: el.dataset.docPrev, docNew: el.dataset.docNew }, el.dataset.ledgerLinked === "1");
-        if (kind.kind === "return") {
-          const retMatch = kind.invoice;
-          const opts = { ...base, cur: "$", type: "return", amount: retMatch.total || credit, no: retMatch.number ? String(retMatch.number) : docNumber("RET"), lines: retMatch.lines || [] };
-          // أرصدة القيد المخزَّنة وحدها — لا الرصيد الحالي أبداً.
-          applyReturnLedger(opts, retMatch, el.dataset.docPrev, el.dataset.docNew);
-          exportVoucherPdf(opts);
-        } else if (kind.kind !== "receipt") {
-          showNoticeNow("error", kind.kind === "invoice-discount"
-            ? "هذا السطر حسم على الفاتورة " + (kind.invoice?.number || "") + " وليس سند قبض — صدّر الفاتورة نفسها."
-            : kind.kind === "return-pending"
-            ? "هذا القيد مرتجع مبيعات، وتفاصيله لم تُزامَن بعد — لا مستند له حتى المزامنة التالية."
-            : "لا يمكن الحكم على هذا القيد: يطابق مرتجعاً ولا ربط قطعياً له — لم يُطبع سند قبض ولا مرتجع.");
-        } else {
-          exportMovementReceipt(base, item, credit, storedDocNew);
-        }
-      } else {
-        showNoticeNow("error", "لا يمكن تصدير هذا القيد.");
-      }
-    });
-  });
+  bindMovementDocButtons(app);
   app.querySelectorAll("[data-action='gen-invoice-doc']").forEach((el) => {
     el.addEventListener("click", () => {
       try {
@@ -14170,6 +14882,15 @@ function render() {
     });
   });
 
+  app.querySelectorAll("[data-visibility-filter]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const value = btn.dataset.visibilityFilter;
+      state.pricingVisibilityFilter = ["all", "shown", "hidden"].includes(value) ? value : "all";
+      writeJson("pricing-visibility-filter", state.pricingVisibilityFilter);
+      render();
+    });
+  });
+
   app.querySelectorAll("[data-ameen-filter]").forEach((button) => {
     button.addEventListener("click", () => {
       state.ameenFilter = button.dataset.ameenFilter;
@@ -14258,15 +14979,27 @@ boot();
 setInterval(() => {
   if (isInventoryCounter()) return;
   // لا نقاطع المستخدم أثناء الكتابة في نموذج
-  const active = document.activeElement;
-  if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) return;
+  if (isEditingFormField()) return;
   const autoRefreshRoutes = ["ameen", "balances", "pricing", "dashboard", "payments"];
   if (autoRefreshRoutes.includes(state.route) && (!dataStore.isConfigured() || state.session)) {
     Promise.all([loadInventoryReports(), loadCustomerBalanceReports(), loadCustomerCreditLimits(), loadApprovedPriceItems()])
-      .then(() => render())
+      .then(() => renderAfterPeriodicRefresh())
       .catch(() => {});
   }
 }, 60000);
+
+// الفواتير الفورية: قراءة خفيفة كل 10 ثوانٍ (صفوف ما بعد لقطة التقرير فقط)، وإعادة
+// رسم فقط حين يتغيّر شيء فعلاً، وبلا مقاطعة كتابة في نموذج.
+setInterval(() => {
+  if (isInventoryCounter() || document.hidden) return;
+  if (!dataStore.isConfigured() || !state.session) return;
+  if (isEditingFormField()) return;
+  // «الفواتير السابقة» تُعرض داخل مسار المبيعات (state.salesHistoryOpen) لا مسار مستقل؛
+  // نموذج إدخال الفاتورة نفسه لا يُعاد رسمه هنا (حارس الحقل النشط فوق، وشرط الشاشة).
+  const salesHistory = state.route === "sales" && state.salesHistoryOpen;
+  if (!salesHistory && !["ameen", "balances", "pricing", "dashboard", "payments"].includes(state.route)) return;
+  loadLiveInvoices().then((changed) => { if (changed) renderAfterPeriodicRefresh(); }).catch(() => {});
+}, 10000);
 
 setInterval(async () => {
   if (isInventoryCounter()) return;

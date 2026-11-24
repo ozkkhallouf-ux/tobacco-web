@@ -2,13 +2,39 @@ name: فحص المشروع
 
 on:
   pull_request:
+  workflow_dispatch:  # يتيح لـOZK Auto-Repair (propose) تشغيل هذا الفحص على Draft PR يفتحه GITHUB_TOKEN،
+    # الذي لا يُطلق تلقائياً pull_request (قيد منع التكرار المعروف لدى GitHub). لا شروط if هنا
+    # تعتمد على سياق pull_request، فكل الوظائف تعمل بالضبط كما تعمل من pull_request.
 
 permissions:
   contents: read
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
+  # ------------------------------------------------------------
+  # بوابة `npm run check` مقسّمة إلى 4 shards متوازية (المرحلة 2 من تسريع CI).
+  #
+  # كل shard وظيفة على عدّاء مستقل (Postgres ومتصفح ومنافذ وملفات مؤقتة خاصة به)،
+  # يشغّل جزءه تسلسلياً بنفس دلالة البوابة، ويختار جزءه بتقسيم حتمي موزون بأزمنة
+  # CI المقيسة (scripts/checks.weights.json). أي فحص جديد بلا وزن يأخذ وزناً افتراضياً
+  # ويبقى مغطّى — الأوزان القديمة تُفسد التوازن وحده، لا التغطية.
+  #
+  # ⚠️ الفحص الإلزامي `check` هو وظيفة التجميع أدناه، لا هذه الـshards — اسمها
+  # (سياق الفحص) لم يتغيّر، فلا لمس للـruleset. عدد الـshards (4) مكتوب في ثلاثة
+  # مواضع: matrix هنا، و--shard، و--total في التجميع؛ أي عدم تطابق يُفشل البوابة
+  # (shard ناقص أو صيغة k/n مرفوضة)، لا يمرّرها.
+  # ------------------------------------------------------------
+  check-shard:
+    name: check shard ${{ matrix.shard }}/4
+    # مثبّت على ubuntu-24.04 لا ubuntu-latest: منذ 2026-11-03 صار ubuntu-latest هو ubuntu-26.04
+    # وفيه PostgreSQL 18 فقط، بينما الفحوص تشترط PostgreSQL 16 (التحقق أدناه يُفشل غيره عمداً).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      # كل shard يكمل حتى لو فشل غيره، فتظهر كل الإخفاقات في تشغيل واحد. لا
+      # يمرّر هذا نتيجة ناقصة: التجميع يشترط نجاح الأربعة وتقاريرها.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,21 +50,92 @@ jobs:
 
       # Postgres محلي لهذه الوظيفة: فحص التنظيف يتصل بمقبس peer عبر sudo
       # عندما لا يُضبط PGHOST. وظيفتا validate وpages تستخدمان خدمة postgres:16.
+      #
+      # PostgreSQL 16 مثبّت مسبقاً في صورة ubuntu-24.04 (خادم وعميل وcontrib). كان
+      # `apt-get install postgresql postgresql-client postgresql-contrib` لا يضيف إلا الحزم
+      # الوصفية الثلاث (16+257build1.1، 52KB، كلها all) بعد `apt-get update` يكلّف 15–40s —
+      # ثابت في سجل 2026-10-26: "0 upgraded, 3 newly installed". فالخادم نفسه لم يتغيّر.
+      # التثبيت يبقى احتياطاً إن غاب postgresql-16 عن صورة مستقبلية، والتحقق أدناه يُفشل
+      # الوظيفة بدل أن تختلف البيئة بصمت.
       - name: Start throwaway Postgres for the warehouse prune test
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-client postgresql-contrib
+          set -euo pipefail
+          if ! dpkg-query -W -f='${Status}' postgresql-16 2>/dev/null | grep -q 'install ok installed' \
+            || ! command -v pg_lsclusters >/dev/null; then
+            echo "postgresql-16 غير مثبّت مسبقاً على العدّاء — تثبيت احتياطي من apt"
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-client postgresql-contrib
+          fi
+          dpkg-query -W postgresql-16 postgresql-client-16
           if ! pg_isready -q; then
             ver="$(pg_lsclusters --no-header | awk 'NR==1 { print $1 }')"
             sudo pg_ctlcluster "$ver" main start
           fi
-          sudo -u postgres psql -d postgres -c 'select 1'
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c 'select version()'
+          # البيئة التي تفترضها الفحوص: الخادم 16، وpgcrypto وdblink متاحان.
+          test "$(sudo -u postgres psql -d postgres -tAc "select current_setting('server_version_num')::int / 10000")" = 16
+          test "$(sudo -u postgres psql -d postgres -tAc "select count(*) from pg_available_extensions where name in ('pgcrypto', 'dblink')")" = 2
 
+      # نفس `npx playwright install --with-deps chromium` حرفياً، من كاش موثوق — راجع
+      # .github/actions/install-playwright-chromium/action.yml.
       - name: Install Playwright Chromium browser
-        run: npx playwright install --with-deps chromium
+        uses: ./.github/actions/install-playwright-chromium
 
-      - name: Run project check
-        run: npm run check
+      - name: Run project check (shard ${{ matrix.shard }}/4)
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: npm run check -- --shard "$SHARD/4" --weights scripts/checks.weights.json --report "$RUNNER_TEMP/check-shard-reports/check-shard-$SHARD.json"
+
+      # التقرير يُكتب فقط إن نجحت كل فحوص الـshard؛ غيابه وحده يُفشل التجميع.
+      - name: Upload shard report
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-shard-report-${{ matrix.shard }}
+          path: ${{ runner.temp }}/check-shard-reports/check-shard-${{ matrix.shard }}.json
+          retention-days: 1
+          if-no-files-found: error
+
+  # ------------------------------------------------------------
+  # وظيفة التجميع: هي الفحص الإلزامي `check` (معرّفها بلا name:، كما كان).
+  #
+  # `if: always()` شرط سلامة لا راحة: وظيفة متخطّاة (skipped) لأن needs فشلت تُحسب
+  # «ناجحة» في الفحوص الإلزامية. فهذه تعمل دائماً — حتى عند الإلغاء — وتفشل صراحةً
+  # ما لم تنجح الـshards الأربعة، ثم تعيد حساب التقسيم المتوقع من البيان في هذا
+  # الـcommit وتطابق تقارير الـshards معه: كل فحص من الـ130 نُفِّذ ونجح مرة واحدة بالضبط.
+  # ------------------------------------------------------------
+  check:
+    if: ${{ always() }}
+    needs: [check-shard]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require every shard to succeed
+        env:
+          SHARDS_RESULT: ${{ needs.check-shard.result }}
+        run: |
+          echo "نتيجة الـshards: $SHARDS_RESULT"
+          if [ "$SHARDS_RESULT" != "success" ]; then
+            echo "::error::check: الـshards لم تنجح كلها (النتيجة: $SHARDS_RESULT) — فشل أو إلغاء أو تخطٍّ أو عدم تنفيذ."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: check-shard-report-*
+          path: ${{ runner.temp }}/check-shard-reports
+          merge-multiple: true
+
+      - name: Verify every check ran exactly once
+        run: node scripts/verify-check-shards.mjs --dir "$RUNNER_TEMP/check-shard-reports" --total 4 --weights scripts/checks.weights.json
 
   # ------------------------------------------------------------
   # المسارات الحرجة: الطبقة الوحيدة التي تفتح التطبيق وتتنقّل فيه كما يفعل
@@ -75,8 +172,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # نفس `npx playwright install --with-deps chromium` حرفياً، من كاش موثوق — راجع
+      # .github/actions/install-playwright-chromium/action.yml.
       - name: Install Playwright Chromium browser
-        run: npx playwright install --with-deps chromium
+        uses: ./.github/actions/install-playwright-chromium
 
       - name: Run critical journeys
         run: npm run check:critical
@@ -138,6 +237,13 @@ jobs:
       - name: Windows deploy gate - task launcher regression test
         shell: powershell
         run: .\tools\tests\Test-RunRepoTask.ps1
+
+      # الدفعة د0: صلاحيات سجل المشغّل. حساب محلي مؤقت غير مدير يكتب السجل الشهري
+      # عبر المشغّل الحقيقي، ويُرفض حذفه وإعادة تسميته وتغيير صلاحياته والكتابة على
+      # ملفات البوابة. كل شيء في مجلد مؤقت، والحساب يُحذف في النهاية.
+      - name: Windows deploy gate - launcher log ACL test
+        shell: powershell
+        run: .\tools\tests\Test-LauncherLogAcl.ps1
 
       # Codex P1 #5: مهمة نشرات الأسعار تحتاج main؛ تحويل المستودع التشغيلي إلى
       # windows-production محجوب حتى تعمل من worktree مخصّص صحيح (فرع/remote/مسار).
@@ -273,6 +379,68 @@ jobs:
       - name: Cashier reprint - local print agent, power loss and recovery test
         shell: powershell
         run: .\tools\tests\Test-CashierReprintAgent.ps1
+
+      # أرشيف إيصالات الكاشير الثابت (ozk-print-bridge/OzkReceiptArchive.psm1): JSON قانوني ثابت البايتات،
+      # نسخة لا تُستبدل، مراحل التسليم دون استنتاج ورقي، سلسلة بصمات تكشف العبث، وكتّاب متزامنون. بيانات وهمية.
+      - name: Cashier receipt archive - immutable copy, stages and tamper evidence test
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptArchive.ps1
+
+      # مراقب «الإيصال ≠ الفاتورة الحالية» (tools/cashier-receipt-watch): تعديل/حذف/إعادة إدخال/رقم معاد
+      # استخدامه، بلا تنبيه تاريخي، بلا تكرار، بلا أسماء زبائن، SELECT فقط. بلا أمين ولا تيليغرام.
+      - name: Cashier receipt watch - post-print edit/delete detection and alert test
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptWatch.ps1
+
+      # دوال الجسر الحقيقية معزولة: state.json بشكل OZKUSER الحي، ثبات الرأس، الأسعار، تثبيت GUID، ترتيب
+      # الأرشيف قبل العلامة والتسليم، وقراءة أداة إعادة الطباعة للأرشيف والنسخة التاريخية. بلا SQL ولا طابعة.
+      - name: Cashier receipt archive - bridge integration and upgrade compatibility test
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptBridgeIntegration.ps1
+
+      # سيناريوهات الأعطال بدوال الجسر الحقيقية: تعذّر كتابة الأرشيف، انقطاع قبل العلامة وبعدها وبعد التسليم،
+      # فشل قبل المهمة وبعدها، وإقلاعات متكررة — ورقة واحدة على الأكثر دائماً. طباعة وهمية.
+      - name: Cashier receipt archive - failure, power loss and restart scenarios test
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptFailureScenarios.ps1
+
+      # تطابق تصميم 80mm بالبكسل وبايتات ESC/POS بين الرسّام الحي على OZKUSER (f7806b56) ورسّام
+      # أداة إعادة الطباعة، مع تقرير معلوماتي عن فرق رسّام المستودع الرئيسي. GDI+ بلا طابعة.
+      - name: Cashier receipt 80mm - pixel and ESC/POS match against the live OZKUSER renderer
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptVisualMatch.ps1 -ReportMainRenderer
+
+      # فواتير الكاشير الطويلة: الرسّام الحي يقصّ بصمت عند 2600 نقطة؛ المرشّح (live-renderer) يطابقه بكسلاً
+      # لما يقصر عن ذلك، ويرسم 30 و40 و60 سطراً كاملة بإجمالياتها وتذييلها، ويرفض ما يتجاوز الحد. بلا طباعة.
+      - name: Cashier receipt 80mm - long invoices (10/20/30/40/60 lines) without truncation
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptLongInvoice.ps1
+
+      # تقسيم صورة الإيصال إلى أوامر GS v 0 بحِزَم 128 صفاً بدل 512 (مخزن XP-T80Q ‏64 KB): رؤوس الأوامر وطولها،
+      # صفوف البيانات بالبايت، لا بايتات زائدة، الدالة متطابقة في الرسّامات الثلاثة، ونموذج طابعة لفقد البايتات
+      # والانقطاع، وإيصالات حقيقية من الرسّام المُصلَح. بلا طباعة.
+      - name: Cashier receipt ESC/POS banding - command structure, byte identity and loss model
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptBanding.ps1
+
+      # مسار إعادة الطباعة الاختياري عبر تعريف Windows (printTransport=driver): RAW لم يتغيّر سطراً، الإعداد
+      # والمتغيّر للعملية الفرعية وحدها، رسّام قديم ⇒ blocked، نتائج الفشل بلا إعادة إرسال، صفوف التعريف = صفوف
+      # RAW بالبت، StretchDIBits 1:1 لا يغيّر بتاً، ورفض الصفحة قبل إنشاء أي مهمة. بلا طباعة.
+      - name: Cashier reprint driver transport - RAW unchanged, pixel identity, pre-job refusals
+        shell: powershell
+        run: .\tools\tests\Test-CashierReprintDriverTransport.ps1
+
+      # صف الحماية لمسار التعريف: نموذج سلوك تعريف Xprinter يطابق التقاطين حقيقيين بالبايت، المقارِن يرفض كل
+      # نقص أو زيادة أو تحجيم أو قص (لا نجاح وهمي)، وصف الحبر وحده يحفظ أول صف من الشعار في 7/45/60 سطراً.
+      - name: Cashier reprint driver guard row - real captures, no-false-pass comparator, first logo row kept
+        shell: powershell
+        run: .\tools\tests\Test-CashierReprintDriverGuard.ps1
+
+      # تنظيف منفذ الالتقاط المؤقت: حراسة USB003 ومنفذ الكاشير وما خارج مجلد الالتقاط قبل أي حذف، لا حذف لمنفذ
+      # يستعمله طابور، محاولات محدودة مع انتظار، وكل خطأ يُعاد بلا إخفاء — بـSpooler وهمي، بلا طابعات.
+      - name: Cashier reprint capture cleanup - guarded, bounded and visible temporary port removal
+        shell: powershell
+        run: .\tools\tests\Test-CashierReprintCaptureCleanup.ps1
 
       # غلاف المهمة المجدولة لأرشفة Drive (غير مسجَّل): القفل والتزامن، المهلة وقتل الشجرة،
       # الوضع المحصور بـdry-run، ملف STOP، تنقيح السجل وتدويره — بعامل وهمي بلا أي خدمة حقيقية.

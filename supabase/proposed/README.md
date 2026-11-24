@@ -273,3 +273,30 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 | `26-document-archive-notify-claims-rollback.sql` | تراجع جاهز — غير مطبَّق | يحذف الجدول ودواله الأربع وحدها؛ جداول 22 لا تُمسّ. انشر قبله نسخة الدالة السابقة. |
 
 - **اختبار:** `scripts/check-drive-invoice-archive.mjs` فوق 22 على Postgres محلي (`supabase/tests/document-archive-notify-claims.sql`)، ثم 12 عملية psql متوازية تحجز المهمة نفسها (حجز واحد بالضبط)، ثم التراجع.
+
+## 27: فواتير بانتظار تسعير المالك (2026-11-05) — غير مطبَّقة على الإنتاج
+
+| الملف | ما يفعله |
+|---|---|
+| `27-sales-price-requests.sql` | جدول جديد `sales_price_requests` ودوال `sales_price_request_submit/price/mark_entered/cancel`. لا يمسّ أي جدول قائم. معاملة واحدة بحارس. |
+| `27-sales-price-requests-rollback.sql` | يحذف الجدول والدوال (يحذف الطلبات المحفوظة — بموافقة المالك فقط). |
+
+التطبيق يدوي في SQL Editor بموافقة المالك، ثم تُنسخ إلى `supabase/migrations/` بالإصدار الفعلي.
+
+## 28: تصحيح تصنيف النشرة عامة/وزاري بمعرّف الأمين (2026-11-05) — مطبَّقة على الإنتاج 2026-11-05 بالإصدار `20261105170000` (نسختها في `supabase/migrations/20261105170000_item_bulletin_classifications.sql`، مطابقة حرفياً)
+
+| الملف | ما يفعله |
+|---|---|
+| `28-item-bulletin-classifications.sql` | جدولان جديدان (`item_bulletin_classifications`، `item_bulletin_classification_audit`)، دالة `set_item_bulletin_classification` للمالك وحده، ونافذة anon `bulletin_item_classification_feed` (item_key والنشرة فقط) لمولّد النشرات، وبذر تصحيحَي وينستون المخصص (463/464 ⇒ general). لا يمسّ أي جدول قائم ولا سعراً. |
+| `28-item-bulletin-classifications-rollback.sql` | يحذف الجدولين والدالة والنافذة وتسجيل الهجرة. الوينستون المخصص يبقى «عامة» لأن تصحيحه مثبّت بالكود. |
+
+التطبيق يدوي في SQL Editor بموافقة المالك عبر ملف اللصق الذرّي (حارس + تسجيل 20261105170000 داخل المعاملة + بصمة `approved_price_items` قبل/بعد)، ثم تُنسخ إلى `supabase/migrations/` بالإصدار الفعلي.
+
+## 29: تحرير حجز إشعار واحد بعد عطل جزئي في دفعة (2026-11-10) — غير مطبَّقة على الإنتاج
+
+| الملف | الحالة | ما يفعله |
+|---|---|---|
+| `29-document-archive-notify-release-claim.sql` | **مقترح — غير مطبَّق** (بموافقة المالك فقط، **قبل** نشر نسخة `document-archive-notify` التي تستدعيه) | دالة `service_role` وحده جديدة `document_archive_release_notification_claim(job_id, token)`: تحرير حجز واحد بعينه، محصور بـ`job_id = X and claim_token = Y and state = 'sending'` فقط — تماماً كحارس `document_archive_finish_notification` (26). لا تمسّ حجزاً تحوّل unknown أصلاً (انتهاء مهلة) ولا حجزاً أعاد طلب آخر حجزه بـtoken جديد (تزامن): 0 صف في كلتا الحالتين. تستدعيها `handleNotifyBatch` فقط حين يفشل حجز مهمة في وسط دفعة، لتحرير كل ما حُجز بنجاح في هذه الدفعة بعينها قبل إرجاع الخطأ، بدل تركه معلّقاً بلا أي محاولة إرسال حتى تنتهي مهلته. لا تمسّ 26 ولا تُستخدم مكان `document_archive_release_notification_claims` الجماعية (تلك لا تمسّ إلا unknown ولا تُحصَر بtoken، فهي غير صالحة لهذا الغرض). |
+| `29-document-archive-notify-release-claim-rollback.sql` | تراجع جاهز — غير مطبَّق | يحذف الدالة وحدها؛ جدول الحجوزات ودوال 26 لا تُمسّ. انشر قبله نسخة الدالة السابقة من `document-archive-notify`. |
+
+- **اختبار:** `scripts/check-drive-invoice-archive.mjs` فوق 26 على Postgres محلي (`supabase/tests/document-archive-notify-claims.sql`): تحرير بـtoken صحيح، لا شيء بـtoken قديم/خاطئ، لا شيء على حجز صار unknown أو sent أو released أصلاً، ثم عمليات psql متوازية على الحجز نفسه، ثم التراجع. واختبارات سلوك `handleNotifyBatch` نفسه (فشل الحجز في أول/وسط/آخر الدفعة، فشل أثناء التحرير نفسه، انقطاع شبكة خلال الحجز أو التحرير) في القسم الجديد من `check-drive-invoice-archive.mjs`.

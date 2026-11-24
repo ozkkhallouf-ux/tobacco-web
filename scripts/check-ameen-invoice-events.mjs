@@ -245,6 +245,14 @@ for (const name of [
   "agent: only failures before Resolve can trigger SQL recovery",
   "agent: database name re-verified after every reconnect",
   "agent: dead pooled connections cleared before reopening",
+  "strict env file: agent refuses a missing, corrupt or malformed file with code 7 and never falls back to the environment",
+  "strict env file: SQL outage still goes through DISCONNECTED/RECONNECTING/GAVE_UP (code 6)",
+  "login guard: query passes the read-only guard as is",
+  "login guard: unexpected account refused without naming it",
+  "login guard: write on the price table, db_datawriter, database INSERT, EXECUTE or sysadmin refused",
+  "login guard: fail-closed on undetermined role, missing read permission or empty result",
+  "login guard: runs after the database check on every connection, first and after each reconnect",
+  "login guard: a confirmed violation stops the agent with code 8 and a refusal line",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -361,6 +369,14 @@ const walk = (dir) => {
     // الوكيل ومكتبته، والمراقب (يذكر اسمه ليتعرّف على عمليته فقط — حارسه في القسم ٤)، وفحوص scripts/check*.mjs
     // (تقرأ الملفات ولا تشغّلها — نفس استثناء writeScan في البوابة).
     if ([agentRel, libRel, "tools/ameen-invoice-agent-monitor.ps1"].includes(relPosix) || /^scripts\/check[^/]*\.mjs$/.test(relPosix)) continue;
+    // إعداد بوابة نشر Windows (الدفعة د0) يذكر ملفَّي الوكيل في longRunningComponents ليُسجَّل
+    // DEPLOYED_PENDING_RESTART عند تغيّرهما — قائمة مراقبة لا تشغّل شيئاً. خارج ذلك المكوّن ممنوع.
+    if (relPosix === "tools/deploy-gate/gate-config.example.json") {
+      const g = JSON.parse(readFileSync(path.join(root, rel), "utf8"));
+      const rest = { ...g, longRunningComponents: g.longRunningComponents.filter((c) => c.name !== "TOBACCO Ameen Invoice Agent") };
+      if (JSON.stringify(rest).includes("ameen-invoice-event-agent")) runners.push(rel);
+      continue;
+    }
     if (readFileSync(path.join(root, rel), "utf8").includes("ameen-invoice-event-agent")) runners.push(rel);
   }
 };

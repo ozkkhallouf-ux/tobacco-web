@@ -5,13 +5,29 @@ on:
     branches: [main]
   push:
     branches: [decision-engine-ui, feat/supplier-obligations-sync]
+  workflow_dispatch:  # يتيح لـOZK Auto-Repair (propose) تشغيل هذا الفحص على Draft PR يفتحه GITHUB_TOKEN،
+    # الذي لا يُطلق تلقائياً pull_request/push (قيد منع التكرار المعروف لدى GitHub). لا شروط if هنا
+    # تعتمد على سياق pull_request، فكل الوظائف تعمل بالضبط كما تعمل من pull_request.
 
 permissions:
   contents: read
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
+  # ------------------------------------------------------------
+  # `npm run check` مقسّمة إلى 4 shards متوازية — نفس تصميم check.yml وضماناته
+  # (راجع التعليق هناك). كل shard على عدّاء مستقل بخدمة postgres:16 خاصة به.
+  # الفحص الإلزامي `validate` هو وظيفة التجميع أدناه، باسمها نفسه.
+  # ------------------------------------------------------------
+  validate-shard:
+    name: validate shard ${{ matrix.shard }}/4
+    # مثبّت على ubuntu-24.04 لا ubuntu-latest: منذ 2026-11-03 صار ubuntu-latest هو ubuntu-26.04
+    # وفيه PostgreSQL 18 فقط، بينما الفحوص تشترط PostgreSQL 16 (التحقق أدناه يُفشل غيره عمداً).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:16
@@ -33,17 +49,70 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      # psql 16 مثبّت مسبقاً في صورة ubuntu-24.04؛ apt كان يضيف الحزمة الوصفية postgresql-client
+      # وحدها بعد `apt-get update` (10–47s). التثبيت يبقى احتياطاً، والإصدار يُتحقق منه.
       - name: Install Postgres client
-        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client
-      - run: npx playwright install --with-deps chromium
-      - name: Run project check
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null; then
+            echo "psql غير مثبّت مسبقاً على العدّاء — تثبيت احتياطي من apt"
+            sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client
+          fi
+          psql --version
+          psql --version | grep -qE '\(PostgreSQL\) 16\.'
+      # نفس `npx playwright install --with-deps chromium` حرفياً، من كاش موثوق.
+      - name: Install Playwright Chromium browser
+        uses: ./.github/actions/install-playwright-chromium
+      - name: Run project check (shard ${{ matrix.shard }}/4)
         env:
           PGHOST: 127.0.0.1
           PGPORT: "5432"
           PGUSER: postgres
           PGPASSWORD: postgres
           PGDATABASE: postgres
-        run: npm run check
+          SHARD: ${{ matrix.shard }}
+        run: npm run check -- --shard "$SHARD/4" --weights scripts/checks.weights.json --report "$RUNNER_TEMP/validate-shard-reports/validate-shard-$SHARD.json"
+      # التقرير يُكتب فقط إن نجحت كل فحوص الـshard؛ غيابه وحده يُفشل التجميع.
+      - name: Upload shard report
+        uses: actions/upload-artifact@v4
+        with:
+          name: validate-shard-report-${{ matrix.shard }}
+          path: ${{ runner.temp }}/validate-shard-reports/validate-shard-${{ matrix.shard }}.json
+          retention-days: 1
+          if-no-files-found: error
+
+  # ------------------------------------------------------------
+  # وظيفة التجميع = الفحص الإلزامي `validate`. `if: always()` كي لا تصير «متخطّاة»
+  # (تُحسب ناجحة) حين تفشل shard أو تُلغى؛ تفشل صراحةً ما لم تنجح الأربعة، وتطابق
+  # تقاريرها مع التقسيم المتوقع، ثم تشغّل الفحوص الساكنة التي كانت بعد npm run check.
+  # ------------------------------------------------------------
+  validate:
+    if: ${{ always() }}
+    needs: [validate-shard]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require every shard to succeed
+        env:
+          SHARDS_RESULT: ${{ needs.validate-shard.result }}
+        run: |
+          echo "نتيجة الـshards: $SHARDS_RESULT"
+          if [ "$SHARDS_RESULT" != "success" ]; then
+            echo "::error::validate: الـshards لم تنجح كلها (النتيجة: $SHARDS_RESULT) — فشل أو إلغاء أو تخطٍّ أو عدم تنفيذ."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Download shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: validate-shard-report-*
+          path: ${{ runner.temp }}/validate-shard-reports
+          merge-multiple: true
+      - name: Verify every check ran exactly once
+        run: node scripts/verify-check-shards.mjs --dir "$RUNNER_TEMP/validate-shard-reports" --total 4 --weights scripts/checks.weights.json
       - run: node --check src/decision-scoring.js
       - run: node --check src/decision-engine.js
       - run: node --check src/decision-data-bridge.js

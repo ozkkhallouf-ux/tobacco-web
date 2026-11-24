@@ -12,6 +12,7 @@
 | `run-repo-task.ps1` | مشغّل موحّد لكل Scheduled Task تشغّل سكربتاً من المستودع. يتخطى أثناء النشر، ويتحقق من بصمات سكربتات الكتابة |
 | `notify.ps1` | تنبيه تيليغرام مستقل عن سكربتات المستودع |
 | `migration-preflight.ps1` | فحص قراءة فقط قبل تحويل المستودع التشغيلي إلى `windows-production`: المهام التي تحتاج main (`mainDependentTasks`، فارغة اليوم) يجب أن تعمل من worktree مخصّص صحيح، والمتقاعدة (`retiredMainTasks`) يجب أن تبقى معطّلة. يستدعيه `-Mode Initialize` أيضاً |
+| `set-launcher-log-acl.ps1` | يجهّز مرة واحدة، بحساب مدير، مجلد سجل المشغّل `launcherLogDir` خارج مجلد البوابة. حسابات المهام تنشئ الملفات وتلحق بها فقط، بلا حذف ولا تغيير صلاحيات. بلا `-Apply` يطبع الخطة فقط |
 | `gate-config.example.json` | الإعداد المرجعي: المسارات، الفحوص المطلوبة، `pauseTasks`، `writerScripts` |
 
 ## التشغيل على الجهاز (بعد التثبيت)
@@ -44,4 +45,6 @@ powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\Prog
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\tests\Test-DeployGate.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\tests\Test-RunRepoTask.ps1
+# يحتاج مديراً: ينشئ حساباً محلياً مؤقتاً ويحذفه
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\tests\Test-LauncherLogAcl.ps1
 ```

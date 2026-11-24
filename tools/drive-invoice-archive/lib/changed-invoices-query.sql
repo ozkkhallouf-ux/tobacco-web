@@ -13,6 +13,8 @@
 --   @since        مؤشر الصفحات: وقت التغيير (datetime2(3))
 --   @sinceGuid    مؤشر الصفحات: آخر GUID عند @since نفسه (صفري لبداية نافذة)
 --   @onlyGuid     NULL للرصد العادي؛ أو فاتورة واحدة لطابور إعادة أخطاء الرصد
+--   @createdFrom  NULL (تجربة محصورة/قبل الإنتاج)؛ أو لحظة التفعيل بساعة SQL: لا تُقرأ فاتورة
+--                 أُنشئت قبلها مهما عُدّلت أو تغيّر تاريخها (u.Date يكتبه المستخدم فلا يكفي)
 --
 -- المؤشر مركّب (changed_at, GUID) وحصري، بنفس ترتيب ORDER BY: 500 فاتورة أو أكثر بالوقت
 -- نفسه (استيراد دفعة) لا تحبس الصفحات على أول 500. changed_at مقرَّب إلى datetime2(3)
@@ -48,6 +50,7 @@ SELECT TOP (500)
                                        c.Discount, c.Extra, c.BonusQnt, c.VAT, c.StoreGUID, c.CostGUID))
      FROM dbo.bi000 c WHERE c.ParentGUID = u.GUID)   AS lines_checksum,
   CONVERT(nvarchar(33), chg.changed_at, 126)          AS changed_at,
+  CONVERT(nvarchar(33), CONVERT(datetime2(3), u.CreateDate), 126) AS created_at,
   DATEDIFF(second, chg.changed_at, GETDATE())         AS seconds_since_change
 FROM dbo.bu000 u
 CROSS APPLY (
@@ -64,4 +67,5 @@ WHERE u.TypeGUID IN (@t0, @t1)
   AND (u.CreateDate >= DATEADD(second, -1, @since) OR u.LastUpdateDate >= DATEADD(second, -1, @since))
   AND (chg.changed_at > @since OR (chg.changed_at = @since AND u.GUID > @sinceGuid))
   AND (@onlyGuid IS NULL OR u.GUID = @onlyGuid)
+  AND (@createdFrom IS NULL OR u.CreateDate >= @createdFrom)
 ORDER BY chg.changed_at ASC, u.GUID ASC

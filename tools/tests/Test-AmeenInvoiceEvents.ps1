@@ -153,6 +153,21 @@ try {
   $e = Resolve-AmeenInvoiceChanges -State (New-AmeenInvoiceState) -Observations @(@{ guid = $G1; snapshot = $s1; ops = @(); detected_at_utc = "2026-10-20T15:00:09.000Z"; source_create_utc = "2026-10-20T15:00:00.000Z"; source_update_utc = "2026-10-20T15:00:05.000Z" })
   Assert 'no log op: source time = real LastUpdateDate before CreateDate' ($e[0].source_event_at -eq "2026-10-20T15:00:05.000Z")
 
+  # ── ٤ب) جهاز إدخال بمنطقة زمنية أمام منطقة الوكيل (2026-11-01: سوريا UTC+3 مقابل بيروت UTC+2) ─────
+  # وقت السجل يتقدّم ساعة كاملة على لحظة الرصد ⇒ كان يُعزل «من المستقبل» ولا يصل. الحدث لا يقع بعد رصده.
+  $skewAt = "2026-11-01T16:23:15.000Z"; $skewDet = "2026-11-01T15:23:18.000Z"
+  $e = Resolve-AmeenInvoiceChanges -State (New-AmeenInvoiceState) -Observations @(@{ guid = $G1; snapshot = $s1; ops = @(@{ op = 1; at_utc = $skewAt }); detected_at_utc = $skewDet; source = "incremental"; source_create_utc = $skewAt })
+  Assert 'clock skew: log time ahead of detection is capped to detection time' ($e.Count -eq 1 -and $e[0].source_event_at -eq $skewDet)
+  Assert 'clock skew: event id hashes the capped time (server formula unchanged)' ($e[0].event_id -eq (Get-AmeenSha256Hex ("{0}|{1}|upsert|{2}|{3}" -f $G1.ToLowerInvariant(), $e[0].source_seq, $e[0].version_hash, $skewDet)))
+  Assert 'clock skew: capped event passes the local contract (not dead-lettered as future)' ($null -eq (Test-AmeenInvoiceEvent -InvoiceEvent $e[0] -NowUtc ([datetime]::Parse($skewDet, $script:Invariant, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal).AddSeconds(2))))
+  $e = Resolve-AmeenInvoiceChanges -State (New-AmeenInvoiceState) -Observations @(@{ guid = $G1; snapshot = $null; ops = @(@{ op = 2; at_utc = $skewAt }); detected_at_utc = $skewDet })
+  Assert 'clock skew: delete event capped too' ($e.Count -eq 1 -and $e[0].kind -eq "delete" -and $e[0].source_event_at -eq $skewDet)
+  $e = Resolve-AmeenInvoiceChanges -State (New-AmeenInvoiceState) -Observations @(@{ guid = $G1; snapshot = $s1; ops = @(); detected_at_utc = $skewDet; source_create_utc = $skewAt })
+  Assert 'clock skew: CreateDate fallback capped too' ($e[0].source_event_at -eq $skewDet)
+  Assert 'cap: earlier source time kept as is' ((Limit-AmeenEventTimeToDetection -SourceAtUtc "2026-11-01T15:20:00.000Z" -DetectedAtUtc $skewDet) -eq "2026-11-01T15:20:00.000Z")
+  Assert 'cap: missing detection time leaves source time' ((Limit-AmeenEventTimeToDetection -SourceAtUtc $skewAt -DetectedAtUtc "") -eq $skewAt)
+  Assert 'cap: unreadable detection time leaves source time' ((Limit-AmeenEventTimeToDetection -SourceAtUtc $skewAt -DetectedAtUtc "not-a-time") -eq $skewAt)
+
   # ── ٥) صندوق الإرسال: لا فقدان، لا تكرار، ترتيب ───────────────────────────────────────────────
   $box = Join-Path $tempDir "outbox"
   Initialize-AmeenInvoiceOutbox -Dir $box
@@ -574,7 +589,25 @@ try {
   Write-Host ("  perf: full save {0:n0} ms, watermark save avg {1:n1} ms, median {2:n1} ms (2000 bills)" -f $fullMs, $wmAvg, $wmMedian)
   Assert 'performance: 20 unchanged cycles never rewrite state.json' ((Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash -eq $stateHash)
   Assert 'performance: watermark save stays well under the 500ms cycle budget' ($wmAvg -lt 100)
-  Assert 'performance: watermark save is at least 10x cheaper than a full save' (($wmMedian * 10) -lt [math]::Max($fullMs, 1))
+
+  # ما يكتبه كل حفظ وكلفة عمل الكود نفسه، بمعزل عن قرص العدّاء: يُعترض Write-AmeenAtomicFile بنسخة
+  # تسجّل الملف والحجم ولا تلمس القرص. زمن fsync (عشرات ms على عدّاء ubuntu) يدخل في الحفظين معاً،
+  # فقياس النسبة على القرص الحقيقي كان يقيس القرص لا الكود (فشل run 41192566439: full 425، وسيط 74.5).
+  $realAtomicWrite = ${function:Write-AmeenAtomicFile}
+  $atomicWrites = New-Object System.Collections.Generic.List[object]
+  function Write-AmeenAtomicFile { param([string]$Path, [AllowEmptyString()][string]$Content) $atomicWrites.Add([pscustomobject]@{ Name = [IO.Path]::GetFileName($Path); Bytes = [Text.Encoding]::UTF8.GetByteCount($Content) }) }
+  try {
+    [void](Save-AmeenInvoiceWatermark -Dir $pbox -State $ps); $wmWrites = $atomicWrites.ToArray(); $atomicWrites.Clear()
+    Save-AmeenInvoiceState -Dir $pbox -State $ps; $fullWrites = $atomicWrites.ToArray(); $atomicWrites.Clear()
+    $cpuFull = @(); for ($k = 1; $k -le 5; $k++) { $sw.Restart(); Save-AmeenInvoiceState -Dir $pbox -State $ps; $cpuFull += $sw.Elapsed.TotalMilliseconds }
+    $cpuWm = @(); for ($k = 1; $k -le 21; $k++) { $sw.Restart(); [void](Save-AmeenInvoiceWatermark -Dir $pbox -State $ps); $cpuWm += $sw.Elapsed.TotalMilliseconds }
+  } finally { ${function:Write-AmeenAtomicFile} = $realAtomicWrite }
+  $cpuFullMin = ($cpuFull | Measure-Object -Minimum).Minimum; $cpuWmMedian = @($cpuWm | Sort-Object)[10]
+  Write-Host ("  perf (no disk): full save min {0:n1} ms, watermark save median {1:n3} ms; bytes {2} vs {3}" -f $cpuFullMin, $cpuWmMedian, $fullWrites[0].Bytes, $wmWrites[0].Bytes)
+  Assert 'performance: watermark save writes watermark.json only, never state.json' ($wmWrites.Count -eq 1 -and $wmWrites[0].Name -eq "watermark.json")
+  Assert 'performance: full save writes state.json then watermark.json' ($fullWrites.Count -eq 2 -and $fullWrites[0].Name -eq "state.json" -and $fullWrites[1].Name -eq "watermark.json")
+  Assert 'performance: watermark payload stays constant-size with 2000 bills' ($wmWrites[0].Bytes -lt 256 -and ($wmWrites[0].Bytes * 1000) -lt $fullWrites[0].Bytes)
+  Assert 'performance: watermark save is at least 10x cheaper than a full save' (($cpuWmMedian * 10) -lt [math]::Max($cpuFullMin, 1))
 
   # إعادة التشغيل: العلامة الأحدث تُعتمد إن كانت لنفس نسخة الحالة، ولا تُفقد التغييرات
   $rs = Read-AmeenInvoiceState -Dir $pbox
@@ -720,6 +753,99 @@ try {
   $relock = Enter-AmeenOutboxLock -Dir $cbox
   Assert 'first connection failure: outbox lock released after exit' ($null -ne $relock)
   if ($relock) { Exit-AmeenOutboxLock $relock }
+
+  # ── ٥ط) حساب SQL الصارم (2026-10-31): لا رجوع صامت إلى حساب يملك كتابة ─────────────────────────
+  $sdir = Join-Path $tempDir "strict"
+  New-Item -ItemType Directory -Force -Path $sdir | Out-Null
+  $sGood = Join-Path $sdir "good.env"
+  Set-Content -LiteralPath $sGood -Value @("# agent secret file", "AMEEN_SQL_CONNECTION_STRING=Server=127.0.0.1,1;Database=AmnDb002;User ID=ozk_invoice_agent_reader;Password=STRICT-NOT-REAL-77;Connect Timeout=1") -Encoding UTF8
+  $sNoKey = Join-Path $sdir "nokey.env"
+  Set-Content -LiteralPath $sNoKey -Value @("garbage ¤¤ not a setting", "OTHER=1") -Encoding UTF8
+  $sDup = Join-Path $sdir "dup.env"
+  Set-Content -LiteralPath $sDup -Value @("AMEEN_SQL_CONNECTION_STRING=Server=a;Database=AmnDb002", "AMEEN_SQL_CONNECTION_STRING=Server=b;Database=AmnDb002") -Encoding UTF8
+  $sEmpty = Join-Path $sdir "empty.env"
+  Set-Content -LiteralPath $sEmpty -Value "AMEEN_SQL_CONNECTION_STRING=   " -Encoding UTF8
+  $sBad = Join-Path $sdir "bad.env"
+  Set-Content -LiteralPath $sBad -Value "AMEEN_SQL_CONNECTION_STRING=Server=127.0.0.1;Password=STRICT-NOT-REAL-77;=;;broken" -Encoding UTF8
+  $sNoDb = Join-Path $sdir "nodb.env"
+  Set-Content -LiteralPath $sNoDb -Value "AMEEN_SQL_CONNECTION_STRING=Server=127.0.0.1,1;User ID=x;Password=STRICT-NOT-REAL-77" -Encoding UTF8
+  $rs1 = Read-AmeenStrictConnectionSetting -Path (Join-Path $sdir "absent.env")
+  $rs2 = Read-AmeenStrictConnectionSetting -Path $sNoKey
+  $rs3 = Read-AmeenStrictConnectionSetting -Path $sDup
+  $rs4 = Read-AmeenStrictConnectionSetting -Path $sEmpty
+  $rs5 = Read-AmeenStrictConnectionSetting -Path $sBad
+  $rs6 = Read-AmeenStrictConnectionSetting -Path $sNoDb
+  $rs7 = Read-AmeenStrictConnectionSetting -Path $sGood
+  Assert 'strict env file: missing, corrupt, duplicate, empty or malformed connection refused with a reason' (-not $rs1.ok -and $rs1.reason -eq "missing" -and -not $rs2.ok -and $rs2.reason -eq "no-key" -and -not $rs3.ok -and $rs3.reason -eq "duplicate-key" -and -not $rs4.ok -and $rs4.reason -eq "empty" -and -not $rs5.ok -and $rs5.reason -eq "malformed" -and -not $rs6.ok -and $rs6.reason -eq "malformed")
+  Assert 'strict env file: a valid file yields its connection string' ($rs7.ok -and $rs7.value -match 'ozk_invoice_agent_reader' -and $null -eq $rs7.reason)
+  Assert 'strict env file: refusal carries no part of the connection string' (@($rs1, $rs2, $rs3, $rs4, $rs5, $rs6 | Where-Object { $null -ne $_.value -or $_.reason -match 'STRICT-NOT-REAL|Server|User' }).Count -eq 0)
+
+  # حارس الحساب: استعلام SELECT واحد بمعاملات يمرّ بحارس القراءة فقط، والأدوار والصلاحيات ليست نصاً فيه
+  $gq = Get-AmeenLoginGuardQuery -Database "AmnDb002"
+  Assert 'login guard: query passes the read-only guard as is' (-not (Throws { Assert-AmeenReadOnlySql $gq.sql }))
+  Assert 'login guard: role and permission names are parameters, not SQL text' ($gq.sql -notmatch '(?i)EXECUTE|INSERT|UPDATE|DELETE|sysadmin|db_owner|MaterialPrice' -and @($gq.params | Where-Object { $_.value -eq "EXECUTE" }).Count -ge 1 -and @($gq.params | Where-Object { $_.value -eq "dbo.MaterialPriceListItem000" }).Count -eq 6)
+  Assert 'login guard: every probe has a column and the read tables are exactly the four agent tables' (@($gq.probes).Count -eq ([regex]::Matches($gq.sql, ' AS c\d+')).Count -and (($script:AmeenGuardReadTables | Sort-Object) -join ",") -eq "dbo.bi000,dbo.bt000,dbo.bu000,dbo.log000")
+  function New-GuardValues([string]$Login = "ozk_invoice_agent_reader") {
+    $v = @{ login_name = $Login }
+    foreach ($p in $gq.probes) {
+      switch ($p.kind) { "objread" { $v[$p.column] = 1 } "objwrite" { $v[$p.column] = [System.DBNull]::Value } default { $v[$p.column] = 0 } }
+    }
+    return $v
+  }
+  function Set-GuardProbe($Values, [string]$Label, $Value) { foreach ($p in $gq.probes) { if ($p.label -eq $Label) { $Values[$p.column] = $Value } }; return $Values }
+  $gOk = Test-AmeenLoginGuardResult -Probes $gq.probes -Values (New-GuardValues) -ExpectedLogin "ozk_invoice_agent_reader"
+  Assert 'login guard: dedicated read-only account accepted' ($gOk.ok -and $gOk.violations.Count -eq 0)
+  $gLogin = Test-AmeenLoginGuardResult -Probes $gq.probes -Values (New-GuardValues "tobacco_sync_service") -ExpectedLogin "ozk_invoice_agent_reader"
+  Assert 'login guard: unexpected account refused without naming it' (-not $gLogin.ok -and ($gLogin.violations -join " ") -match 'login:not-ozk_invoice_agent_reader' -and ($gLogin.violations -join " ") -notmatch 'tobacco_sync_service')
+  $gPrice = Test-AmeenLoginGuardResult -Probes $gq.probes -Values (Set-GuardProbe (New-GuardValues) "UPDATE@dbo.MaterialPriceListItem000" 1) -ExpectedLogin "ozk_invoice_agent_reader"
+  $gWriter = Test-AmeenLoginGuardResult -Probes $gq.probes -Values (Set-GuardProbe (New-GuardValues) "db-role:db_datawriter" 1) -ExpectedLogin "ozk_invoice_agent_reader"
+  $gDbIns = Test-AmeenLoginGuardResult -Probes $gq.probes -Values (Set-GuardProbe (New-GuardValues) "database:INSERT" 1) -ExpectedLogin "ozk_invoice_agent_reader"
+  $gSa = Test-AmeenLoginGuardResult -Probes $gq.probes -Values (Set-GuardProbe (New-GuardValues) "server-role:sysadmin" 1) -ExpectedLogin "ozk_invoice_agent_reader"
+  $gExec = Test-AmeenLoginGuardResult -Probes $gq.probes -Values (Set-GuardProbe (New-GuardValues) "database:EXECUTE" 1) -ExpectedLogin "ozk_invoice_agent_reader"
+  Assert 'login guard: write on the price table, db_datawriter, database INSERT, EXECUTE or sysadmin refused' (-not $gPrice.ok -and ($gPrice.violations -contains "UPDATE@dbo.MaterialPriceListItem000") -and -not $gWriter.ok -and -not $gDbIns.ok -and -not $gSa.ok -and -not $gExec.ok)
+  $gNullRole = Test-AmeenLoginGuardResult -Probes $gq.probes -Values (Set-GuardProbe (New-GuardValues) "db-role:db_owner" ([System.DBNull]::Value)) -ExpectedLogin "ozk_invoice_agent_reader"
+  $gNoRead = Test-AmeenLoginGuardResult -Probes $gq.probes -Values (Set-GuardProbe (New-GuardValues) "read@dbo.log000" 0) -ExpectedLogin "ozk_invoice_agent_reader"
+  $gEmpty = Test-AmeenLoginGuardResult -Probes $gq.probes -Values @{} -ExpectedLogin "ozk_invoice_agent_reader"
+  Assert 'login guard: fail-closed on undetermined role, missing read permission or empty result' (-not $gNullRole.ok -and -not $gNoRead.ok -and ($gNoRead.violations -contains "read@dbo.log000:missing") -and -not $gEmpty.ok)
+
+  # الوكيل الحقيقي: -StrictEnvFile لا يرجع إلى متغير البيئة. متغير العملية هنا يشير إلى «حساب كتابة» وهمي على منفذ مغلق:
+  # لو رجع الوكيل إليه لظهر DISCONNECTED والرمز 6 بدل الرفض بالرمز 7.
+  $prevConn = [Environment]::GetEnvironmentVariable("AMEEN_SQL_CONNECTION_STRING", "Process")
+  [Environment]::SetEnvironmentVariable("AMEEN_SQL_CONNECTION_STRING", "Server=127.0.0.1,1;Database=AmnDb002;User ID=env_writer_account;Password=ENV-NOT-REAL-99;Connect Timeout=1", "Process")
+  try {
+    $sbox = Join-Path $sdir "outbox"
+    $slog = Join-Path $sdir "agent-strict.log"
+    & $shell -NoProfile -File $agentPath -Once -StrictEnvFile -OutboxDir $sbox -LogFile $slog -EnvFile (Join-Path $sdir "absent.env") -MaxReconnectAttempts 1 -ReconnectBaseSeconds 0 *> $null
+    $sExit1 = $LASTEXITCODE
+    & $shell -NoProfile -File $agentPath -Once -StrictEnvFile -OutboxDir $sbox -LogFile $slog -EnvFile $sNoKey -MaxReconnectAttempts 1 -ReconnectBaseSeconds 0 *> $null
+    $sExit2 = $LASTEXITCODE
+    & $shell -NoProfile -File $agentPath -Once -StrictEnvFile -OutboxDir $sbox -LogFile $slog -EnvFile $sBad -MaxReconnectAttempts 1 -ReconnectBaseSeconds 0 *> $null
+    $sExit3 = $LASTEXITCODE
+    & $shell -NoProfile -File $agentPath -Once -ExpectedSqlLogin "bad;name" -OutboxDir $sbox -LogFile $slog -EnvFile $sGood -MaxReconnectAttempts 1 -ReconnectBaseSeconds 0 *> $null
+    $sExit4 = $LASTEXITCODE
+    $sText = if (Test-Path -LiteralPath $slog) { Get-Content -Raw -LiteralPath $slog -Encoding UTF8 } else { "" }
+    Assert 'strict env file: agent refuses a missing, corrupt or malformed file with code 7 and never falls back to the environment' ($sExit1 -eq 7 -and $sExit2 -eq 7 -and $sExit3 -eq 7 -and $sText -match 'رفض: ملف الاتصال الصارم' -and $sText -match '\(missing\)' -and $sText -match '\(no-key\)' -and $sText -match '\(malformed\)' -and $sText -notmatch 'DISCONNECTED|GAVE_UP|بدء الوكيل')
+    Assert 'strict env file: an invalid -ExpectedSqlLogin is refused with code 7' ($sExit4 -eq 7 -and $sText -match 'رفض: قيمة -ExpectedSqlLogin')
+    Assert 'strict env file: refusal writes no state, watermark or pending, and releases the lock' (-not (Test-Path -LiteralPath (Join-Path $sbox "state.json")) -and -not (Test-Path -LiteralPath (Join-Path $sbox "watermark.json")) -and -not (Test-Path -LiteralPath (Join-Path $sbox "pending")) -and $null -ne ($sl = Enter-AmeenOutboxLock -Dir $sbox))
+    if ($sl) { Exit-AmeenOutboxLock $sl }
+    # ملف صحيح على منفذ مغلق: الوضع الصارم لا يكسر مسار التعافي من انقطاع SQL (الحارس لا يُبلغ قبل اتصال ناجح)
+    $slog2 = Join-Path $sdir "agent-strict-down.log"
+    & $shell -NoProfile -File $agentPath -Once -StrictEnvFile -OutboxDir $sbox -LogFile $slog2 -EnvFile $sGood -MaxReconnectAttempts 2 -ReconnectBaseSeconds 0 *> $null
+    $sExit5 = $LASTEXITCODE
+    $sText2 = if (Test-Path -LiteralPath $slog2) { Get-Content -Raw -LiteralPath $slog2 -Encoding UTF8 } else { "" }
+    Assert 'strict env file: SQL outage still goes through DISCONNECTED/RECONNECTING/GAVE_UP (code 6)' ($sExit5 -eq 6 -and $sText2 -match 'DISCONNECTED' -and $sText2 -match 'GAVE_UP' -and $sText2 -notmatch 'رفض:')
+    $allStrict = $sText + $sText2
+    Assert 'strict env file: no password, user or environment account in the agent log' ($allStrict -notmatch 'STRICT-NOT-REAL-77|ENV-NOT-REAL-99|env_writer_account|ozk_invoice_agent_reader;')
+  } finally {
+    [Environment]::SetEnvironmentVariable("AMEEN_SQL_CONNECTION_STRING", $prevConn, "Process")
+  }
+  $gText = Get-Content -Raw -LiteralPath $agentPath -Encoding UTF8
+  $openAt = $gText.IndexOf("function Open-AmeenSqlConnection")
+  $openEnd = $gText.IndexOf("function Assert-AmeenLoginGuard")
+  $openBody = if ($openAt -ge 0 -and $openEnd -gt $openAt) { $gText.Substring($openAt, $openEnd - $openAt) } else { "" }
+  Assert 'login guard: runs after the database check on every connection, first and after each reconnect' ($openBody.IndexOf('if ($script:db -ne $ExpectedDatabase)') -ge 0 -and $openBody.IndexOf('if ($script:LoginGuardOn) { Assert-AmeenLoginGuard }') -gt $openBody.IndexOf('if ($script:db -ne $ExpectedDatabase)'))
+  Assert 'login guard: a confirmed violation stops the agent with code 8 and a refusal line' ($gText -match '(?s)function Assert-AmeenLoginGuard.*Write-AgentLog \("رفض: حارس حساب SQL.*exit 8')
+  Assert 'login guard: -StrictEnvFile turns the guard on with the dedicated account and disables environment fallback' ($gText -match 'if \(\$StrictEnvFile -and -not \$ExpectedSqlLogin\) \{ \$ExpectedSqlLogin = "ozk_invoice_agent_reader" \}' -and $gText -match '(?s)function Get-AgentSetting.*if \(\$StrictEnvFile\) \{ return \$null \}.*GetEnvironmentVariable\(\$Name, "Process"\)')
 
   # دورة رصد محاكاة بنفس ترتيب الوكيل (القراءات أولاً، ثم Resolve، ثم الصندوق، ثم العلامة، ثم الحفظ)، بالمصنِّف
   # الحقيقي: انقطاع ثم عودة ثم إعادة تشغيل ⇒ لا حدث ضائع ولا مكرر، والعلامة لا تتقدّم قبل نجاح المعالجة.

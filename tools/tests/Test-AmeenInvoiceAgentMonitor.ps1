@@ -307,6 +307,31 @@ try {
     $tl = Get-AgentTimeline @('2026-10-27 09:00:00 بدء الوكيل: db=AmnDb002', '2026-10-27 09:30:00 رفض: مثيل آخر من الوكيل يعمل على الصندوق نفسه (C:\x) — لا تشغيل متوازٍ.') $null 6
     Assert-True ($tl.lastLine -eq $T0 -and -not $tl.terminal) 'سطر «رفض: مثيل آخر» لا يحدّث آخر نشاط ولا يعني توقفاً'
 
+    Write-Host '== 11ب) رفض حساب SQL أو ملف الاتصال: تنبيه واحد حتى يعود الوكيل'
+    # المهمة تعيد إطلاق الوكيل كل 10 دقائق، فيكتب سطر «رفض:» جديداً في كل محاولة.
+    $c = New-Case 'refusal'
+    $script:ProcAlive = $false
+    Add-Log $c 0 'رفض: حارس حساب SQL — الحساب المتصل غير مقبول (login:not-ozk_invoice_agent_reader, db-role:db_datawriter) — لا تشغيل بحساب يملك كتابة أو صلاحيات إدارية.'
+    [void](Invoke-Run $c 1)
+    $sent = Get-Sent; $msg = (Get-AllMessages)[0]
+    Assert-True ($sent.Count -eq 1 -and $sent[0] -eq 'invoice-agent:stopped:20261027T090000-config' -and $msg -match 'رفض الإقلاع' -and $msg -match 'حساب SQL غير مقبول') 'رفض حارس الحساب: تنبيه توقف فوري واحد'
+    Assert-True ($msg -notmatch 'db_datawriter|login:not|tobacco_sync') 'نص سطر الرفض لا يدخل التنبيه'
+    Add-Log $c 10 'رفض: ملف الاتصال الصارم (-StrictEnvFile) غير صالح (missing) — لا رجوع إلى متغيرات البيئة، لا تشغيل.'
+    [void](Invoke-Run $c 11)
+    Add-Log $c 20 'رفض: حارس حساب SQL — الحساب المتصل غير مقبول (db-role:db_owner) — لا تشغيل بحساب يملك كتابة أو صلاحيات إدارية.'
+    [void](Invoke-Run $c 21); [void](Invoke-Run $c 26)
+    Assert-True ((Get-Sent).Count -eq 1) 'رفض متكرر كل 10 دقائق بلا إقلاع بينها: لا رسالة جديدة'
+    $script:ProcAlive = $true
+    Add-Start $c 30
+    [void](Invoke-Run $c 31)
+    $sent = Get-Sent
+    Assert-True ($sent.Count -eq 2 -and $sent[1] -eq 'invoice-agent:back:20261027T090000-config') 'إقلاع ناجح بعد الرفض: تنبيه back واحد'
+    $script:ProcAlive = $false
+    Add-Log $c 40 'رفض: حارس حساب SQL — الحساب المتصل غير مقبول (database:INSERT) — لا تشغيل بحساب يملك كتابة أو صلاحيات إدارية.'
+    [void](Invoke-Run $c 41)
+    $sent = Get-Sent
+    Assert-True ($sent.Count -eq 3 -and $sent[2] -eq 'invoice-agent:stopped:20261027T094000-config') 'رفض جديد بعد العودة: توقف جديد يُبلَّغ عنه'
+
     Write-Host '== 12) لا أسرار في أي تنبيه'
     # الرسائل تُمسح مع كل حالة جديدة؛ هنا تُولَّد الأنواع الأربعة دفعة واحدة بسجل مليء بالأسرار.
     $c = New-Case 'secrets'

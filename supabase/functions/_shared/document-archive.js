@@ -12,9 +12,16 @@
 //   * الوصف نص عادي بلا parse_mode، فلا حقن تنسيق.
 // ============================================================================
 
+// نصوص كل نوع بتذكيره وتأنيثه: «فاتورة جملة جديدة/معدّلة» و«سند قبض جديد/معدّل».
 export const DOC_TYPES = Object.freeze({
-  wholesale_invoice: { label: "فاتورة جملة", icon: "🧾" },
-  receipt: { label: "سند قبض", icon: "💵" },
+  wholesale_invoice: {
+    label: "فاتورة جملة", numberLabel: "فاتورة رقم", icon: "🧾",
+    isNew: "جديدة", isEdited: "معدّلة", newVersion: "فاتورة جديدة", amountLabel: "المبلغ",
+  },
+  receipt: {
+    label: "سند قبض", numberLabel: "سند قبض رقم", icon: "💵",
+    isNew: "جديد", isEdited: "معدّل", newVersion: "سند قبض جديد", amountLabel: "المبلغ المستلم",
+  },
 });
 
 // حد تيليغرام لوصف المرفق 1024 محرفاً؛ هامش للأمان.
@@ -113,25 +120,89 @@ export function buildNotifyCaption(v) {
   const versionLabel = tag(v.version);
   const versionText = edited
     ? `${versionLabel} — تعديل؛ الإصدار ${tag(v.version - 1)} وما قبله محفوظ بلا تغيير`
-    : `${versionLabel} — فاتورة جديدة`;
+    : `${versionLabel} — ${type.newVersion}`;
   const amount = v.amount === null || v.amount === undefined
     ? "—"
     : t.money(v.amount, v.currency || "$", 2);
+  // العنوان بتنسيق اسم الملف على Drive: «اسم الزبون - فاتورة رقم 1151 - 31-10-2026».
+  const [y, m, d] = v.doc_date.split("-"); // DATE_RE مُتحقَّق في validateNotifyFields
+  const title = `${t.name(v.customer_name, "زبون غير محدد", 80)} - ${type.numberLabel} ${t.name(v.doc_number)} - ${t.LRI}${d}-${m}-${y}${t.PDI}${edited ? ` - ${versionLabel}` : ""}`;
   const lines = [
-    t.line(`${edited ? "✏️" : type.icon} ${type.label} ${edited ? "معدّلة" : "جديدة"} — أرشفة ناجحة`),
+    t.line(`${edited ? "✏️" : type.icon} ${title}`),
+    t.line(`${type.label} ${edited ? type.isEdited : type.isNew} — أرشفة ناجحة`),
     t.field("الزبون", t.name(v.customer_name, "زبون غير محدد")),
     t.field("رقم المستند", t.name(v.doc_number)),
     t.field("الإصدار", versionText),
     t.field("التاريخ", `${t.LRI}${v.doc_date}${t.PDI}`),
-    t.field("المبلغ", amount),
+    t.field(type.amountLabel, amount),
     t.field("حالة الأرشفة", "✅ محفوظ في Google Drive (خاص)"),
     t.line("الرابط الخاص (يفتح بحساب المالك فقط):"),
     v.drive_link,
   ];
   const full = lines.join("\n");
   if (full.length <= CAPTION_MAX) return { caption: full, followUp: null };
-  const short = [lines[0], lines[2], lines[3], lines[6]].join("\n").slice(0, CAPTION_MAX);
+  const short = [lines[0], lines[1], lines[3], lines[4], lines[7]].join("\n").slice(0, CAPTION_MAX);
   return { caption: short, followUp: full.slice(0, 3900) };
+}
+
+// حدّ رسالة تيليغرام (sendMessage) 4096 محرفاً؛ هامش أمان كما CAPTION_MAX لنفس السبب.
+export const BATCH_MESSAGE_MAX = 3900;
+
+function renderBatchPage(order, byType, pageIndex, pageCount, total) {
+  const t = fmt();
+  const countLabel = total === 1 ? "مستند معدَّل" : "مستندات معدَّلة";
+  const header = pageCount > 1
+    ? t.line(`📋 تحديث جماعي — ${total} ${countLabel} (رسالة ${pageIndex + 1}/${pageCount})`)
+    : t.line(`📋 تحديث جماعي — ${total} ${countLabel}`);
+  const lines = [header];
+  for (const docType of order) {
+    const list = byType.get(docType);
+    const type = DOC_TYPES[docType];
+    const label = type ? type.label : docType;
+    const numbers = list.map((it) => t.name(it.doc_number)).join("، ");
+    lines.push(t.field(`${label} (${list.length})`, numbers));
+  }
+  lines.push(t.line("كل تعديل محفوظ بنسخة جديدة على Drive، والإصدار السابق باقٍ بلا تغيير."));
+  return lines.join("\n");
+}
+
+// رسائل ملخص لتحديث جماعي (عدة مستندات معدَّلة معاً): العدد وأرقام المستندات كاملة بدل
+// إشعار مستقل لكل واحد. رسالة واحدة تكفي عملياً دائماً (انظر تعليق burstNotifyThreshold في
+// config.js)؛ تُقسَّم إلى أكثر من رسالة متتالية فقط إذا تجاوز النص فعلاً حدّ تيليغرام
+// (BATCH_MESSAGE_MAX) — بلا حذف أو تقصير أي رقم فاتورة مهما كان العدد. كل صفحة مستقلة بذاتها
+// (ترويسة وتذييل كاملان) كي يُنهي العنصر حجزه بنجاح رسالته هو وحدها، لا الدفعة كلها.
+export function buildBatchSummaries(items) {
+  const total = items.length;
+  let currentOrder = [];
+  let currentByType = new Map();
+  let currentItems = [];
+  const pages = [];
+
+  const flush = () => { if (currentItems.length > 0) pages.push({ order: currentOrder, byType: currentByType, items: currentItems }); };
+
+  for (const it of items) {
+    const nextByType = new Map(currentByType);
+    const nextOrder = currentOrder.includes(it.doc_type) ? currentOrder : [...currentOrder, it.doc_type];
+    nextByType.set(it.doc_type, [...(nextByType.get(it.doc_type) || []), it]);
+    // هامش محافظ: نقيس بترويسة «رسالة n/2» دائماً (أطول من ترويسة الصفحة الواحدة) كي لا
+    // يتجاوز النص الحدّ الحقيقي بعد معرفة عدد الصفحات النهائي.
+    const probe = renderBatchPage(nextOrder, nextByType, 0, 2, total);
+    if (probe.length > BATCH_MESSAGE_MAX && currentItems.length > 0) {
+      flush();
+      currentOrder = [it.doc_type];
+      currentByType = new Map([[it.doc_type, [it]]]);
+      currentItems = [it];
+    } else {
+      currentOrder = nextOrder;
+      currentByType = nextByType;
+      currentItems = [...currentItems, it];
+    }
+  }
+  flush();
+  if (pages.length === 0) return [];
+
+  const pageCount = pages.length;
+  return pages.map((p, i) => ({ text: renderBatchPage(p.order, p.byType, i, pageCount, total), items: p.items }));
 }
 
 // صف document_archive_items الذي تسجّله الدالة بعد الإرسال.

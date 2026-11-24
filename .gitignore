@@ -39,6 +39,10 @@ tmp/
 # Supabase CLI local state
 supabase/.temp/
 
+# آخر نسخة محفوظة من الأصناف المخفية عن الزبائن (احتياط عند فشل قراءة Supabase
+# أثناء توليد النشرة) — تُعاد عبر actions/cache في CI، لا تدخل Git محلياً.
+scripts/.cache/
+
 # ─── PrintBridge / ameen-autoprint runtime artifacts — لا تدخل Git أبداً ────
 # ملفات الحالة (GUIDs المطبوعة) وسجلات الأحداث الخاصة بأي جهاز
 tools/ameen-autoprint/last-printed.json

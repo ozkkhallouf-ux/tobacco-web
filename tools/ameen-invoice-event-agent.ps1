@@ -19,6 +19,13 @@
 #   * SQL قراءة فقط (Assert-AmeenReadOnlySql قبل كل تنفيذ)، بلا NOLOCK، مع LOCK_TIMEOUT 3000.
 #   * لا يقرأ سلسلة اتصال الكتابة إطلاقاً — AMEEN_SQL_CONNECTION_STRING وحدها.
 #   * يرفض العمل على قاعدة غير AmnDb002 إلا بـ -ExpectedDatabase صريح (لقاعدة الاختبار).
+#   * -StrictEnvFile (2026-10-31): الإعدادات من ملف -EnvFile حصراً، بلا رجوع إلى متغيرات البيئة. ملف مفقود
+#     أو تالف أو بلا سلسلة اتصال ⇒ «رفض:» وخروج برمز 7. ويفعّل حارس حساب SQL بالحساب المتوقع
+#     -ExpectedSqlLogin (افتراضياً ozk_invoice_agent_reader).
+#   * حارس حساب SQL (مع -StrictEnvFile أو -ExpectedSqlLogin) بعد كل اتصال، أولاً وبعد كل عودة: الحساب هو
+#     المتوقع، ويقرأ log000/bt000/bu000/bi000، ولا يملك أي كتابة أو تعديل أو دور إداري (ولا على جدول الأسعار)
+#     ⇒ وإلا «رفض:» وخروج برمز 8 قبل أي قراءة للفواتير. المراقب يعدّ سطر «رفض:» توقفاً وينبّه.
+#     بلا الخيارين: السلوك السابق كما هو (تشغيل DRY RUN الحالي)، مع سطر تحذير عند البدء.
 #   * حارس أداء: دورة أبطأ من 500ms أو مهلات أقفال ⇒ يبطّئ الإيقاع تلقائياً حتى 30 ثانية.
 #
 # التشغيل اليدوي (للمراجعة فقط، بعد موافقة المالك):
@@ -57,7 +64,10 @@ param(
     # ثم خروج صريح برمز 6. 0 = بلا حدّ.
     [int]$MaxReconnectAttempts = 288,
     [int]$ReconnectBaseSeconds = 2,
-    [int]$ReconnectMaxSeconds = 300
+    [int]$ReconnectMaxSeconds = 300,
+    # حساب SQL الصارم (2026-10-31): انظر «حدود ثابتة» أعلاه.
+    [switch]$StrictEnvFile,
+    [string]$ExpectedSqlLogin = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,6 +93,8 @@ if (Test-Path -LiteralPath $EnvFile) {
 }
 function Get-AgentSetting([string]$Name) {
     if ($settings.ContainsKey($Name)) { return $settings[$Name] }
+    # الوضع الصارم: الملف وحده، فلا يعود الوكيل صامتاً إلى سلسلة في بيئة العملية أو المستخدم.
+    if ($StrictEnvFile) { return $null }
     $v = [Environment]::GetEnvironmentVariable($Name, "Process")
     if (-not $v) { $v = [Environment]::GetEnvironmentVariable($Name, "User") }
     return $v
@@ -114,7 +126,18 @@ if ($ListDeadLetter -or $RepairDeadLetterSeq -gt 0) {
     exit 0
 }
 
-$connStr = Get-AgentSetting "AMEEN_SQL_CONNECTION_STRING"
+# حارس حساب SQL: يُفعَّل بـ-StrictEnvFile أو -ExpectedSqlLogin. اسم الحساب المتوقع ليس سراً، ويُتحقق من صيغته.
+if ($StrictEnvFile -and -not $ExpectedSqlLogin) { $ExpectedSqlLogin = "ozk_invoice_agent_reader" }
+$script:LoginGuardOn = [bool]$ExpectedSqlLogin
+if ($script:LoginGuardOn -and $ExpectedSqlLogin -notmatch '^[A-Za-z0-9_.\\-]{1,128}$') { Write-AgentLog "رفض: قيمة -ExpectedSqlLogin غير صالحة — لا تشغيل."; exit 7 }
+
+if ($StrictEnvFile) {
+    $strict = Read-AmeenStrictConnectionSetting -Path $EnvFile
+    if (-not $strict.ok) { Write-AgentLog ("رفض: ملف الاتصال الصارم (-StrictEnvFile) غير صالح ({0}) — لا رجوع إلى متغيرات البيئة، لا تشغيل." -f $strict.reason); exit 7 }
+    $connStr = $strict.value
+} else {
+    $connStr = Get-AgentSetting "AMEEN_SQL_CONNECTION_STRING"
+}
 if (-not $connStr) { Write-AgentLog "خطأ: AMEEN_SQL_CONNECTION_STRING غير موجود."; exit 1 }
 
 # ---------------------------------------------------------------- SQL
@@ -147,6 +170,38 @@ function Open-AmeenSqlConnection {
     $script:conn.Open()
     $script:db = (Invoke-AmeenRead "SELECT DB_NAME() d").Rows[0].d
     if ($script:db -ne $ExpectedDatabase) { Write-AgentLog "رفض: القاعدة المتصلة $($script:db) لا تطابق $ExpectedDatabase."; exit 4 }
+    # بعد كل فتح، أول مرة وبعد كل عودة: سلسلة الاتصال ثابتة، لكن صلاحيات الحساب قد تتغيّر بين الاتصالين.
+    if ($script:LoginGuardOn) { Assert-AmeenLoginGuard }
+}
+
+# حارس حساب SQL: استعلام SELECT واحد بمعاملات (أسماء الأدوار والصلاحيات ليست نصاً في الاستعلام).
+# خطأ اتصال أثناءه يُرمى كأي قراءة فيتولاه مسار التعافي؛ أما نتيجة محسومة مخالفة فرفض نهائي برمز 8.
+$script:LoginGuardLogged = $false
+function Assert-AmeenLoginGuard {
+    $q = Get-AmeenLoginGuardQuery -Database $script:db
+    Assert-AmeenReadOnlySql $q.sql
+    $c = $script:conn.CreateCommand()
+    $c.CommandTimeout = 15
+    $c.CommandText = $q.sql
+    foreach ($p in $q.params) {
+        $sp = New-Object System.Data.SqlClient.SqlParameter($p.name, [System.Data.SqlDbType]::NVarChar, 256)
+        $sp.Value = $p.value
+        [void]$c.Parameters.Add($sp)
+    }
+    $da = New-Object System.Data.SqlClient.SqlDataAdapter($c)
+    $t = New-Object System.Data.DataTable
+    [void]$da.Fill($t)
+    $values = @{}
+    if ($t.Rows.Count -eq 1) { foreach ($col in $t.Columns) { $values[$col.ColumnName] = $t.Rows[0][$col.ColumnName] } }
+    $r = Test-AmeenLoginGuardResult -Probes $q.probes -Values $values -ExpectedLogin $ExpectedSqlLogin
+    if (-not $r.ok) {
+        Write-AgentLog ("رفض: حارس حساب SQL — الحساب المتصل غير مقبول ({0}) — لا تشغيل بحساب يملك كتابة أو صلاحيات إدارية." -f (($r.violations | Select-Object -First 12) -join ", "))
+        exit 8
+    }
+    if (-not $script:LoginGuardLogged) {
+        Write-AgentLog ("حارس حساب SQL: سليم — الحساب {0}، قراءة فقط ({1} جداول)، بلا كتابة ولا أدوار إدارية." -f $ExpectedSqlLogin, $script:AmeenGuardReadTables.Count)
+        $script:LoginGuardLogged = $true
+    }
 }
 
 function Get-AmeenConnectionStateText {
@@ -247,6 +302,7 @@ try {
     $sendOn = Test-AmeenSendActivated -Dir $OutboxDir -SendRequested:$Send
     Write-AgentLog ("بدء الوكيل: db={0} outbox={1} send={2} last_seq={3} bills={4}" -f $db, $OutboxDir, $sendOn, $state.last_seq, $state.bills.Count)
     if ($Send -and -not $sendOn) { Write-AgentLog "الإرسال مطلوب لكن ملف التفعيل غير موجود — رصد فقط." }
+    if (-not $script:LoginGuardOn) { Write-AgentLog "تحذير: حارس حساب SQL غير مفعّل (بلا -StrictEnvFile ولا -ExpectedSqlLogin) — الحماية من الكتابة في الكود وحده." }
 
     $start = Get-Date
     $lastReconcile = [datetime]::MinValue

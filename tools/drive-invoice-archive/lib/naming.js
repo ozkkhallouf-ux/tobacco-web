@@ -6,8 +6,8 @@
 const ROOT_FOLDER_NAME = "OZK Tobacco Archive";
 
 const DOC_TYPES = Object.freeze({
-  wholesale_invoice: { folder: "فواتير مبيعات الجملة", label: "فاتورة جملة" },
-  receipt: { folder: "سندات القبض", label: "سند قبض" },
+  wholesale_invoice: { folder: "فواتير مبيعات الجملة", label: "فاتورة جملة", numberLabel: "فاتورة رقم" },
+  receipt: { folder: "سندات القبض", label: "سند قبض", numberLabel: "سند قبض رقم" },
 });
 
 // محارف ممنوعة في أسماء الملفات على Windows/Drive، ومحارف التحكم والاتجاه.
@@ -54,11 +54,23 @@ function folderPlan(job) {
   ];
 }
 
-// «فاتورة جملة - رقم 1234 - 2026-10-24 - 1a2b3c4d - V1.pdf»، والتعديلات V2 وV3… بجانبها.
-function fileName(job) {
-  const info = docTypeInfo(job.docType);
-  const number = safeSegment(job.number, 30) || "بلا-رقم";
-  return `${info.label} - رقم ${number} - ${job.date} - ${shortGuid(job.sourceGuid)} - V${Number(job.version) || 1}.pdf`;
+// «2026-10-31» ⇒ «31-10-2026» (التاريخ كما يقرؤه المالك). تاريخ غير صالح يُرفض كما في folderPlan.
+function displayDate(date) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(date || ""));
+  if (!m) throw new Error(`تاريخ مستند غير صالح: ${date}`);
+  return `${m[3]}-${m[2]}-${m[1]}`;
 }
 
-module.exports = { ROOT_FOLDER_NAME, DOC_TYPES, safeSegment, shortGuid, customerFolderName, folderPlan, fileName };
+// «اسم الزبون - فاتورة رقم 1151 - 31-10-2026.pdf». الاسم من الفاتورة نفسها (customerName من
+// الأمين)، منظَّفاً من محارف Windows/Drive الممنوعة ومحارف الاتجاه ومقصوصاً عند 80 محرفاً.
+// النسخة المعدّلة V2 فما فوق تحمل لاحقة « - V2» كي لا يحمل ملفان في المجلد نفسه الاسم نفسه.
+// الاسم للعرض وحده: الهوية ومنع التكرار بـappProperties.ozkJobId، لا بالاسم.
+function fileName(job) {
+  const info = docTypeInfo(job.docType);
+  const customer = safeSegment(job.customerName) || "زبون غير محدد";
+  const number = safeSegment(job.number, 30) || "بلا-رقم";
+  const version = Number(job.version) || 1;
+  return `${customer} - ${info.numberLabel} ${number} - ${displayDate(job.date)}${version > 1 ? ` - V${version}` : ""}.pdf`;
+}
+
+module.exports = { ROOT_FOLDER_NAME, DOC_TYPES, safeSegment, shortGuid, customerFolderName, folderPlan, displayDate, fileName };

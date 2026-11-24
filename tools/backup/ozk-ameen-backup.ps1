@@ -25,10 +25,17 @@
 #   7) (اختياري، معطّل افتراضياً) K1-A بـ-PruneOwnRaw: بعد status=ok فقط، وبعد
 #      إعادة مطابقة SHA256 للـzip على C: وD: وللـmanifest، تُزال ملفات .bak الخام
 #      التي أنشأها هذا التشغيل نفسه داخل مجلده فقط. الـzip وmanifest يبقيان دائماً.
+#   8) (اختياري، معطّل افتراضياً) الاحتفاظ بـ-KeepLatest N: بعد status=ok فقط
+#      (محلي وخارجي ok)، تُزال مجلدات التشغيل القديمة على C: تحت LocalRoot\yyyy\
+#      ويبقى آخر N تشغيلاً (منها التشغيل الحالي). لا يُلمس إلا مجلد اسمه
+#      yyyy-MM-dd_HHmmss وفيه manifest.json، وليس junction ولا يحوي junction،
+#      وكل قواعده (من manifest) مشمولة بالتشغيل الحالي؛ وإلا يُحمى ويُترك.
+#      النسخ على القرص الخارجي لا تُلمس إطلاقاً.
 #
 # ما لا يفعله إطلاقاً:
 #   - لا يستبدل أي ملف، والنسخ يرفض وجهة موجودة.
-#   - لا يحذف شيئاً افتراضياً. الحذف الوحيد الممكن هو K1-A أعلاه، عند -PruneOwnRaw فقط.
+#   - لا يحذف شيئاً افتراضياً. الحذف الممكن هو K1-A أعلاه عند -PruneOwnRaw فقط،
+#     والاحتفاظ (8) عند -KeepLatest أكبر من صفر فقط.
 #   - لا RESTORE DATABASE، ولا REPLACE، ولا أي تعديل على القواعد أو إعدادات SQL.
 #   - لا رفع للسحابة (-Cloud مرفوض في هذا الإصدار).
 #   - لا يلمس المهام المجدولة (راجع register-ozk-ameen-backup-task.ps1).
@@ -57,6 +64,7 @@ param(
     [string]$SlackTokenEnvVar = 'SLACK_BOT_TOKEN',
     [switch]$NoSlack,
     [switch]$PruneOwnRaw,
+    [int]$KeepLatest = 0,
     [switch]$Cloud
 )
 
@@ -165,6 +173,12 @@ $script:ZipCreator = {
 $script:FileRemover = {
     param([string]$Path)
     [System.IO.File]::Delete($Path)
+}
+
+# يزيل مجلد تشغيل قديماً بعينه. يُستدعى من Remove-OzkOldRuns وحدها.
+$script:DirRemover = {
+    param([string]$Path)
+    [System.IO.Directory]::Delete($Path, $true)
 }
 
 # ---------- دوال صرفة ----------
@@ -312,6 +326,7 @@ function Format-OzkAlert($Result) {
         foreach ($s in $Result.space) { [void]$lines.Add(('مساحة {0}: {1} GB متاحة' -f $s.Path, $s.FreeGB)) }
     }
     if ($Result.prune -and $Result.prune -ne 'disabled') { [void]$lines.Add(('K1-A: ' + $Result.prune)) }
+    if ($Result.retention -and $Result.retention -ne 'disabled') { [void]$lines.Add(('الاحتفاظ: ' + $Result.retention)) }
     foreach ($e in @($Result.errors)) { [void]$lines.Add(('خطأ: ' + $e)) }
     return ($lines -join "`n")
 }
@@ -414,6 +429,64 @@ function Remove-OzkOwnRawFiles($Result) {
     return @($removed)
 }
 
+# ---------- الاحتفاظ: إزالة مجلدات التشغيل القديمة على C: فقط ----------
+
+# هل كل قواعد التشغيل القديم (من files[].database في manifest.json) مشمولة
+# بقواعد التشغيل الحالي؟ manifest غير مقروء، أو بلا قواعد، أو فيه قاعدة لا
+# يغطيها التشغيل الحالي ⇒ false، فيُحمى التشغيل القديم ولا يُزال.
+function Test-OzkRunCoveredBy([string]$RunDir, $CurrentDatabases) {
+    try {
+        $m = Get-Content -LiteralPath (Join-OzkPath $RunDir 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch { return $false }
+    if ($null -eq $m) { return $false }
+    $dbs = @(@($m.files) | Where-Object { $_ -and $_.database } | ForEach-Object { [string]$_.database })
+    if ($dbs.Count -eq 0) { return $false }
+    $current = @($CurrentDatabases | ForEach-Object { [string]$_ })
+    foreach ($db in $dbs) { if ($current -notcontains $db) { return $false } }
+    return $true
+}
+
+# تبقي آخر KeepLatest تشغيلاً (منها التشغيل الحالي) تحت LocalRoot\yyyy\، وتزيل
+# الأقدم. لا يُزال تشغيل قديم فيه نسخة لقاعدة لا يشملها التشغيل الحالي.
+# الأقدم. المرشّح يجب أن يكون: مجلداً لا junction، اسمه yyyy-MM-dd_HHmmss، فيه
+# manifest.json، جدّه هو LocalRoot نفسه، ولا يحوي أي reparse point. غير ذلك يُترك.
+function Remove-OzkOldRuns($Result, [string]$LocalRoot, [int]$KeepLatest) {
+    if ($KeepLatest -lt 1) { return @() }
+    $sep = [char[]]@([char]92, [char]47)
+    $rootFull = [System.IO.Path]::GetFullPath($LocalRoot).TrimEnd($sep)
+    $currentFull = [System.IO.Path]::GetFullPath($Result.runDir).TrimEnd($sep)
+    if (-not (Test-Path -LiteralPath $rootFull -PathType Container)) { return @() }
+
+    $candidates = New-Object System.Collections.ArrayList
+    foreach ($year in @(Get-ChildItem -LiteralPath $rootFull -Directory -Force)) {
+        if ($year.Name -notmatch '^\d{4}$') { continue }
+        if ($year.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+        foreach ($run in @(Get-ChildItem -LiteralPath $year.FullName -Directory -Force)) {
+            if ($run.Name -notmatch '^\d{4}-\d{2}-\d{2}_\d{6}$') { continue }
+            if ($run.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            $full = [System.IO.Path]::GetFullPath($run.FullName).TrimEnd($sep)
+            if ($full -eq $currentFull) { continue }
+            $grand = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetDirectoryName($full)).TrimEnd($sep)
+            if ($grand -ne $rootFull) { continue }
+            if (-not (Test-Path -LiteralPath (Join-OzkPath $full 'manifest.json') -PathType Leaf)) { continue }
+            [void]$candidates.Add([pscustomobject]@{ Name = $run.Name; Full = $full })
+        }
+    }
+
+    $sorted = @($candidates | Sort-Object Name -Descending)
+    $keepOthers = $KeepLatest - 1
+    $removed = New-Object System.Collections.ArrayList
+    for ($i = $keepOthers; $i -lt $sorted.Count; $i++) {
+        $c = $sorted[$i]
+        $nested = Get-ChildItem -LiteralPath $c.Full -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($nested) { continue }
+        if (-not (Test-OzkRunCoveredBy $c.Full $Result.databases)) { continue }
+        & $script:DirRemover $c.Full
+        [void]$removed.Add($c.Name)
+    }
+    return @($removed)
+}
+
 # ---------- الإنهاء: الحالة والتنبيه دائماً ----------
 
 # يُنهي التشغيل: يحسب الحالة، ويكتب status.json، ويرسل التنبيه، ويسجّل.
@@ -485,11 +558,13 @@ function Invoke-OzkAmeenBackup {
         [string]$SlackTokenEnvVar = 'SLACK_BOT_TOKEN',
         [switch]$NoSlack,
         [switch]$PruneOwnRaw,
+        [int]$KeepLatest = 0,
         [switch]$Cloud,
         [datetime]$Now = (Get-Date)
     )
 
     if ($Cloud) { throw 'النسخ السحابي غير مفعّل في هذا الإصدار ويحتاج موافقة المالك (U1).' }
+    if ($KeepLatest -lt 0) { throw ('-KeepLatest يجب أن يكون 0 (معطّل) أو أكبر: ' + $KeepLatest) }
     Assert-OzkBackupDatabases $Databases
     $script:InstanceName = $Instance
     $layout = New-OzkRunLayout $LocalRoot $Now
@@ -511,6 +586,8 @@ function Invoke-OzkAmeenBackup {
         notify      = 'none'
         prune       = $(if ($PruneOwnRaw) { 'pending' } else { 'disabled' })
         pruned      = @()
+        retention   = $(if ($KeepLatest -gt 0) { 'pending' } else { 'disabled' })
+        removedRuns = @()
         status      = 'pending'
         errors      = @()
         finishedAt  = ''
@@ -531,6 +608,7 @@ function Invoke-OzkAmeenBackup {
         Write-Host ('التنبيه: ' + $(if ($NoSlack) { 'Telegram فقط' } else { 'Slack ' + $SlackChannel + ' ثم Telegram بديلاً' }) + ' (لا إرسال في DryRun)')
         Write-Host ('القفل: ' + $script:LockName)
         Write-Host ('K1-A (إزالة الخام بعد التحقق المزدوج): ' + $(if ($PruneOwnRaw) { 'مفعّل' } else { 'معطّل' }))
+        Write-Host ('الاحتفاظ بآخر النسخ: ' + $(if ($KeepLatest -gt 0) { 'مفعّل (' + $KeepLatest + ')' } else { 'معطّل' }))
         Write-Host 'السحابة: معطّلة'
         $result.local = 'skipped'
         $result.external = 'skipped'
@@ -671,6 +749,23 @@ function Invoke-OzkAmeenBackup {
             }
             $result.status = 'pending'
         }
+        if ($KeepLatest -gt 0) {
+            $okNow = ($errors.Count -eq 0 -and $result.local -eq 'ok' -and $result.external -eq 'ok')
+            if (-not $okNow) {
+                $result.retention = 'skipped: status not ok'
+                Write-OzkLog $StateDir 'RETENTION skipped: status not ok'
+            } else {
+                try {
+                    $result.removedRuns = @(Remove-OzkOldRuns $result $LocalRoot $KeepLatest)
+                    $result.retention = 'done (' + @($result.removedRuns).Count + ')'
+                    Write-OzkLog $StateDir ('RETENTION done: ' + (@($result.removedRuns) -join ', '))
+                } catch {
+                    # فشل الاحتفاظ لا يُفشل نسخة ناجحة: النسخ القديمة تبقى، ويُسجَّل السبب.
+                    $result.retention = 'failed: ' + $_.Exception.Message
+                    Write-OzkLog $StateDir ('RETENTION FAIL: ' + $_.Exception.Message)
+                }
+            }
+        }
         Complete-OzkRun $result $errors $false $StateDir $SlackChannel $SlackTokenEnvVar ([bool]$NoSlack) $NotifyScript
     } catch {
         # أي استثناء غير متوقع (فحص المساحة، إنشاء المجلد، manifest.json، ...) يصبح
@@ -719,7 +814,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         Execute = [bool]$Execute; Databases = $Databases; Instance = $Instance; LocalRoot = $LocalRoot
         ExternalRoot = $ExternalRoot; StateDir = $StateDir; ExpectedHost = $ExpectedHost; NotifyScript = $NotifyScript
         LocalMinFreeGB = $LocalMinFreeGB; ExternalMinFreeGB = $ExternalMinFreeGB; NoCompress = [bool]$NoCompress
-        SlackChannel = $SlackChannel; SlackTokenEnvVar = $SlackTokenEnvVar; NoSlack = [bool]$NoSlack; PruneOwnRaw = [bool]$PruneOwnRaw; Cloud = [bool]$Cloud
+        SlackChannel = $SlackChannel; SlackTokenEnvVar = $SlackTokenEnvVar; NoSlack = [bool]$NoSlack; PruneOwnRaw = [bool]$PruneOwnRaw; KeepLatest = $KeepLatest; Cloud = [bool]$Cloud
     }
     exit $code
 }

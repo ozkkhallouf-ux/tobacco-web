@@ -21,6 +21,8 @@ const { redact, registerSecret } = require(path.join(dir, "lib", "redact.js"));
 const { assertReadOnlySql } = require(path.join(dir, "..", "manual-a4-print", "lib", "sql-guard.js"));
 const template = require(path.join(dir, "..", "ameen-autoprint", "invoice-html.js"));
 const { paperFor } = require(path.join(dir, "..", "manual-a4-print", "lib", "paper.js"));
+const model = require(path.join(dir, "..", "manual-a4-print", "lib", "invoice-model.js"));
+const { priceInvoiceItems } = require(path.join(dir, "lib", "line-prices.js"));
 
 const G1 = "11111111-1111-4111-8111-111111111111";
 const G2 = "22222222-2222-4222-8222-222222222222";
@@ -43,7 +45,12 @@ async function setup({ mode = "live", email, overrides = {} } = {}) {
   const edgeFake = await fakes.createFakeEdge();
   let clock = Date.parse("2026-10-24T12:00:00Z");
   const now = () => clock;
-  const cfg = validate({ ...DEFAULTS, mode, archiveFrom: "2026-10-01", dataDir, edgeUrl: edgeFake.url, ...overrides });
+  // نطاق إنتاج افتراضي واسع (كل الفواتير الوهمية أُنشئت بعده، ولقطة أساس فارغة) كي تبقى
+  // الاختبارات القائمة على حالها؛ اختبارات النطاق تمرّر لحظتها ولقطتها.
+  const { baselineGuids = [], ...rest } = overrides;
+  const prod = { newInvoicesFrom: "1900-01-01T00:00:00", baselineFile: "test-baseline.json", baselineSha256: "0".repeat(64) };
+  const cfg = validate({ ...DEFAULTS, mode, archiveFrom: "2026-10-01", dataDir, edgeUrl: edgeFake.url, ...prod, ...rest });
+  cfg.baselineGuids = baselineGuids;
   const logs = [];
   const log = (e) => logs.push(e);
   const build = () => {
@@ -179,7 +186,7 @@ test("التجربة المحصورة: فاتورة واحدة فقط تُرفع
   t.advance(t.cfg.reconcileMinutes * 60);
   const out = await t.cycle();
   assert.deepEqual(out.pilot, { invoices: 1, expiresAt: t.cfg.pilotExpiresAt });
-  assert.deepEqual(t.drive.pdfFiles().map((f) => f.name), ["فاتورة جملة - رقم 1100 - 2026-10-24 - 11111111 - V1.pdf"]);
+  assert.deepEqual(t.drive.pdfFiles().map((f) => f.name), ["زبون تجريبي - فاتورة رقم 1100 - 24-10-2026.pdf"]);
   assert.equal(t.edgeFake.state.sent.length, 1, "إشعار واحد للفاتورة المحصورة");
   assert.equal(t.store.versionsOf("wholesale_invoice", G3).length, 0, "فاتورة جديدة خارج الحصر لا تُرصد");
   assert.equal(t.store.state.hints[G3], undefined, "ولا تُعلَّم ملحوظة");
@@ -208,9 +215,33 @@ test("التسمية: مسار المجلدات بالنوع/السنة/الشه
   assert.deepEqual(plan.map((p) => p.name), ["OZK Tobacco Archive", "فواتير مبيعات الجملة", "2026", "10", "أبو علي المزة [aaaaaaaa]"]);
   const other = naming.folderPlan({ ...job, customerGuid: CUST_B });
   assert.notEqual(plan[4].key, other[4].key, "زبونان بالاسم نفسه ⇒ مجلدان");
-  assert.equal(naming.fileName(job), "فاتورة جملة - رقم 1234 - 2026-10-24 - 11111111 - V1.pdf");
-  assert.equal(naming.fileName({ ...job, version: 2 }), "فاتورة جملة - رقم 1234 - 2026-10-24 - 11111111 - V2.pdf");
+  assert.equal(naming.fileName(job), "أبو علي المزة - فاتورة رقم 1234 - 24-10-2026.pdf");
+  assert.equal(naming.fileName({ ...job, version: 2 }), "أبو علي المزة - فاتورة رقم 1234 - 24-10-2026 - V2.pdf");
   assert.equal(naming.safeSegment("a‮b\\c:d*e"), "a b c d e");
+});
+
+test("التسمية: اسم الزبون الحقيقي أولاً ثم رقم الفاتورة وتاريخها (dd-mm-yyyy)", () => {
+  const job = { docType: "wholesale_invoice", date: "2026-10-31", customerName: "مركز الخيال مساكن برزة", customerGuid: CUST_B, number: 1151, sourceGuid: G1, version: 1 };
+  assert.equal(naming.fileName(job), "مركز الخيال مساكن برزة - فاتورة رقم 1151 - 31-10-2026.pdf");
+  assert.equal(naming.displayDate("2026-01-05"), "05-01-2026");
+  // محارف ممنوعة على Windows/Drive، أسطر جديدة، ومحارف اتجاه داخل الاسم ⇒ مسافات تُطوى.
+  const dirty = naming.fileName({ ...job, customerName: "  محل\n«النور»: دمشق/المزة*?<>|\u202e‏  " });
+  assert.equal(dirty, "محل «النور» دمشق المزة - فاتورة رقم 1151 - 31-10-2026.pdf");
+  assert.doesNotMatch(dirty.replace(/\.pdf$/, ""), /[\\/:*?"<>|\u0000-\u001f\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+  // اسم عربي طويل جداً ⇒ يُقصّ عند 80 محرفاً (لا بايتاً) ويبقى الرقم والتاريخ كاملين.
+  const longName = "مؤسسة ".repeat(40);
+  const long = naming.fileName({ ...job, customerName: longName });
+  const [shown, ...rest] = long.split(" - ");
+  assert.ok(Array.from(shown).length <= 80, "الاسم ≤ 80 محرفاً");
+  assert.ok(longName.startsWith(shown), "قصّ من النهاية، لا تشويه");
+  assert.deepEqual(rest, ["فاتورة رقم 1151", "31-10-2026.pdf"]);
+  assert.ok(long.length <= 180, "ضمن حد اسم المرفق في الدالة");
+  // بلا اسم ⇒ نص صريح بدل فراغ؛ بلا رقم ⇒ «بلا-رقم».
+  assert.equal(naming.fileName({ ...job, customerName: " " }), "زبون غير محدد - فاتورة رقم 1151 - 31-10-2026.pdf");
+  assert.equal(naming.fileName({ ...job, number: "" }), "مركز الخيال مساكن برزة - فاتورة رقم بلا-رقم - 31-10-2026.pdf");
+  assert.throws(() => naming.fileName({ ...job, date: "31/10/2026" }), /تاريخ مستند غير صالح/);
+  // الاسم لا يحمل الهوية: فاتورتان مختلفتان بالاسم نفسه تبقيان مهمتين مختلفتين (ozkJobId).
+  assert.equal(naming.fileName({ ...job, sourceGuid: G2 }), naming.fileName(job));
 });
 
 // ─── الدورة الكاملة ───
@@ -237,7 +268,7 @@ test("live: رفع خاص إلى المسار الصحيح ثم إشعار ال�
   assert.equal(job.status, "notified");
   const pdfs = t.drive.pdfFiles();
   assert.equal(pdfs.length, 1);
-  assert.equal(t.drive.pathOf(pdfs[0]), "OZK Tobacco Archive/فواتير مبيعات الجملة/2026/10/محل الأمانة [aaaaaaaa]/فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V1.pdf");
+  assert.equal(t.drive.pathOf(pdfs[0]), "OZK Tobacco Archive/فواتير مبيعات الجملة/2026/10/محل الأمانة [aaaaaaaa]/محل الأمانة - فاتورة رقم 501 - 24-10-2026.pdf");
   assert.equal(pdfs[0].shared, false);
   assert.equal(pdfs[0].appProperties.ozkJobId, job.jobId);
   assert.ok(!t.drive.calls.some((c) => /permissions/.test(c.url)), "لا مشاركة إطلاقاً");
@@ -249,7 +280,64 @@ test("live: رفع خاص إلى المسار الصحيح ثم إشعار ال�
     assert.ok(plain.includes(part), `الوصف يتضمن ${part}`);
   }
   assert.ok(msg.caption.length <= 1024);
-  assert.equal(msg.fileName, "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V1.pdf");
+  assert.equal(msg.fileName, "محل الأمانة - فاتورة رقم 501 - 24-10-2026.pdf");
+  const [title, status] = plain.split("\n");
+  assert.equal(title, "🧾 محل الأمانة - فاتورة رقم 501 - 24-10-2026", "عنوان الإشعار بتنسيق اسم الملف");
+  assert.equal(status, "فاتورة جملة جديدة — أرشفة ناجحة");
+});
+
+// المبلغ في الإشعار وتقرير الموقع = «الصافي» المطبوع في الـPDF: Total − الحسم + التدوير (TotalExtra).
+test("المبلغ يحتسب التدوير والحسم ويطابق الـPDF وتيليغرام والموقع، والبصمة ومنع التكرار كما هما", async () => {
+  const { invoiceVersionHash, HASH_SCHEMA } = require(path.join(dir, "lib", "fingerprint.js"));
+  const cases = [
+    { guid: G1, number: 601, total: 3000.98, discount: 0, totalExtra: 0.02, firstPay: 1000, net: 3001, label: "3,001 $" },
+    { guid: G2, number: 602, total: 100.03, discount: 0, totalExtra: -0.03, firstPay: 0, net: 100, label: "100 $" },
+    { guid: G3, number: 603, total: 250.5, discount: 0, totalExtra: 0, firstPay: 50, net: 250.5, label: "250.5 $" },
+    { guid: G4, number: 604, total: 100.7, discount: 5, totalExtra: 0.3, firstPay: 0, net: 96, label: "96 $" },
+    { guid: "55555555-5555-4555-8555-555555555555", number: 605, total: 111.51, discount: 0, totalExtra: 20.4906, firstPay: 50, net: 132, label: "132 $" },
+  ];
+  const t = await setup();
+  const html = new Map();
+  const realRender = t.renderer.render;
+  t.renderer.render = async (h, paper, out) => {
+    html.set(Number(/فاتورة رقم (\d+)/.exec(h)[1]), h.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "));
+    return realRender(h, paper, out);
+  };
+  for (const c of cases) t.ameen.add({ guid: c.guid, number: c.number, total: c.total, discount: c.discount, totalExtra: c.totalExtra, firstPay: c.firstPay });
+  t.advance(300);
+  await t.cycle();
+  const jobs = t.store.jobs();
+  assert.equal(jobs.length, cases.length);
+  const reported = new Map(t.edgeFake.state.reports.flatMap((r) => r.items).map((i) => [i.job_id, i]));
+  const strip = globalThis.ozkTelegramFormat.stripBidi;
+  for (const c of cases) {
+    const job = jobs.find((j) => j.number === c.number);
+    assert.equal(job.status, "notified", `${c.number}`);
+    assert.equal(job.amount, c.net, `${c.number}: مبلغ المهمة = الصافي`);
+    // الـPDF: الصافي (أو إجمالي الفاتورة حين لا حسم ولا تدوير) والمتبقي = الصافي − المدفوع.
+    const text = html.get(c.number);
+    const money = (n) => n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+    const shown = c.discount > 0 || c.totalExtra !== 0 ? "الصافي" : "إجمالي الفاتورة";
+    assert.ok(text.includes(`${shown} $ ${money(c.net)}`), `${c.number}: الـPDF يطبع ${shown} ${c.net}`);
+    assert.ok(text.includes(`المتبقي من هذه الفاتورة $ ${money(c.net - c.firstPay)}`), `${c.number}: المتبقي`);
+    if (c.totalExtra === 0) assert.ok(!/تدوير/.test(text), `${c.number}: لا سطر تدوير`);
+    // تيليغرام: «المبلغ» في الوصف.
+    const msg = t.edgeFake.state.sent.find((m) => m.messageId === job.telegram.messageId);
+    assert.ok(strip(msg.caption).includes(`المبلغ: ${c.label}`), `${c.number}: وصف تيليغرام ${c.label}`);
+    // الموقع: سجل الدالة بعد الإرسال، وتقرير العامل.
+    assert.equal(t.edgeFake.state.items.get(job.jobId).amount, c.net, `${c.number}: سجل الإشعار`);
+    assert.equal(reported.get(job.jobId).amount, c.net, `${c.number}: تقرير الموقع`);
+    // البصمة من الرأس والأسطر الخام في الأمين، لا من المبلغ المحسوب.
+    const row = (await t.ameen.api.changedInvoices({ since: "1900-01-01T00:00:00", dateFrom: "2026-10-01", onlyGuid: c.guid }))[0];
+    assert.equal(job.hashSchema, HASH_SCHEMA);
+    assert.equal(job.versionHash, invoiceVersionHash(row, await t.ameen.api.lines(c.guid)), `${c.number}: البصمة`);
+  }
+  // منع التكرار: دورة مطابقة كاملة لا تنشئ إصداراً ولا إشعاراً ثانياً.
+  const sent = t.edgeFake.state.sent.length;
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  assert.equal(t.store.jobs().length, cases.length, "لا إصدار جديد");
+  assert.equal(t.edgeFake.state.sent.length, sent, "لا إشعار مكرر");
 });
 
 test("فواتير غير مؤهلة لا تُؤرشف: غير مرحّلة، الكاشير، ولم تستقر بعد", async () => {
@@ -389,9 +477,9 @@ test("تعديل فاتورة مؤرشفة ⇒ نسخة 2 بجانب الأول�
   assert.equal(versions[1].previousJobId, v1.jobId);
   const names = t.drive.pdfFiles().map((f) => f.name).sort();
   assert.deepEqual(names, [
-    "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V1.pdf",
-    "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V2.pdf",
-    "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V3.pdf",
+    "زبون تجريبي - فاتورة رقم 501 - 24-10-2026 - V2.pdf",
+    "زبون تجريبي - فاتورة رقم 501 - 24-10-2026 - V3.pdf",
+    "زبون تجريبي - فاتورة رقم 501 - 24-10-2026.pdf",
   ]);
   assert.ok(Buffer.from(t.drive.files.get(v1.drive.fileId).content).equals(v1Bytes), "النسخة الأولى لم تُمسّ");
   assert.equal(t.edgeFake.state.sent.length, 3);
@@ -399,6 +487,7 @@ test("تعديل فاتورة مؤرشفة ⇒ نسخة 2 بجانب الأول�
   assert.match(caption(0), /فاتورة جملة جديدة/);
   assert.match(caption(0), /الإصدار: V1 — فاتورة جديدة/);
   assert.match(caption(1), /فاتورة جملة معدّلة/);
+  assert.match(caption(1).split("\n")[0], /^✏️ زبون تجريبي - فاتورة رقم 501 - 24-10-2026 - V2$/, "عنوان التعديل يحمل لاحقة النسخة");
   assert.match(caption(1), /الإصدار: V2 — تعديل؛ الإصدار V1 وما قبله محفوظ بلا تغيير/);
   assert.match(caption(2), /V3 — تعديل/);
 });
@@ -914,6 +1003,16 @@ test("دالة الإشعار: لا مستلم من الطلب، ولا رابط
   assert.equal(shared.isPdfBytes(Buffer.from("<html>")), false);
   const long = shared.validateNotifyFields({ ...base, customer_name: "ب".repeat(5000) }).value;
   assert.ok(shared.buildNotifyCaption(long).caption.length <= 1024);
+  // العنوان: الاسم مقصوص عند 80 محرفاً، والرقم والتاريخ كاملان.
+  const strip = globalThis.ozkTelegramFormat.stripBidi;
+  const longTitle = strip(shared.buildNotifyCaption(long).caption.split("\n")[0]);
+  assert.ok(longTitle.endsWith(" - فاتورة رقم 501 - 24-10-2026"), longTitle.slice(-40));
+  assert.ok(Array.from(longTitle).length <= 2 + 80 + 30);
+  const named = strip(shared.buildNotifyCaption(shared.validateNotifyFields({ ...base, customer_name: "مركز الخيال مساكن برزة", doc_number: "1151", doc_date: "2026-10-31" }).value).caption);
+  assert.equal(named.split("\n")[0], "🧾 مركز الخيال مساكن برزة - فاتورة رقم 1151 - 31-10-2026");
+  for (const part of ["الزبون: مركز الخيال مساكن برزة", "رقم المستند: 1151", "التاريخ: 2026-10-31", "المبلغ:", "Google Drive", "https://drive.google.com/file/d/F000000000001xyz/view"]) {
+    assert.ok(named.includes(part), `باقي المعلومات محفوظة: ${part}`);
+  }
   assert.equal(shared.timingSafeEqualText("abc", "abd"), false);
   assert.equal(shared.timingSafeEqualText("", ""), false, "سرّ فارغ لا يطابق");
 });
@@ -1018,6 +1117,145 @@ test("سجلات دورة كاملة بأخطاء لا تحمل رمز التح�
   assert.ok(!text.includes("1//refresh-token") && !text.includes("GOCSPX-test"));
 });
 
+// ─── سعر الوحدة وإجمالي السطر (للأرشيف وحده) ───
+// سطر بالعلبة (Unity=1) وسطر بالكرتونة (Unity=2، 50 علبة): Qty بالعلبة دائماً، Price بوحدة الإدخال.
+const PACK = fakes.line({ item_name: "صنف بالعلبة", input_unit: 1, qty: 30, price: 1.5, line_guid: "eeeeeeee-0000-4000-8000-0000000000a1" });
+const CARTON = fakes.line({ item_name: "صنف بالكرتونة", input_unit: 2, unit2_fact: 50, qty: 100, price: 286, line_guid: "eeeeeeee-0000-4000-8000-0000000000a2" });
+
+function headerRow(patch = {}) {
+  return { invoice_guid: G1, invoice_number: 777, invoice_date: "2026-10-24", type_guid: fakes.WHOLESALE, is_posted: 1, customer_name: "زبون اختبار",
+    total: 617, discount: 0, first_pay: 0, currency_val: 1, currency_iso: "USD", line_count: 2, ...patch };
+}
+
+function pricedFor(rows, patch) {
+  const header = model.headerFromRow(headerRow(patch), DEFAULTS);
+  return priceInvoiceItems(model.buildInvoice(header, rows, 250), rows);
+}
+
+test("أسعار الأسطر: القاعدة المعتمدة Price×Qty÷معامل الوحدة، علبة وكرتونة في الفاتورة نفسها، تطابق الإجمالي", () => {
+  const r = pricedFor([PACK, CARTON]); // 1.5×30 + 286×100÷50 = 45 + 572 = 617
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(r.inv.items.map((i) => [i.unit, i.qty, i.unitPrice, i.lineTotal]), [["علبة", 30, 1.5, 45], ["كرتونة", 2, 286, 572]]);
+  // الحسم والمدفوع والعملة كما في الرأس بلا مساس.
+  const d = pricedFor([PACK, CARTON], { discount: 17, first_pay: 100 });
+  assert.equal(d.ok, true);
+  assert.deepEqual([d.inv.total, d.inv.discount, d.inv.firstPay, d.inv.currencyIso], [617, 17, 100, "USD"]);
+});
+
+test("أسعار الأسطر: عملة بسعر صرف ≠ 1 تُقسم كالرأس تماماً", () => {
+  // المخزَّن بعملة الأساس: الإجمالي 6170 وCurrencyVal=10 ⇒ المعروض 617.
+  const rows = [{ ...PACK, price: 15 }, { ...CARTON, price: 2860 }];
+  const r = pricedFor(rows, { total: 6170, currency_val: 10, currency_iso: "SYP" });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(r.inv.items.map((i) => [i.unitPrice, i.lineTotal]), [[1.5, 45], [286, 572]]);
+  assert.equal(r.inv.total, 617);
+});
+
+test("أسعار الأسطر: فرق التقريب لخانتين مقبول، وأي فرق أكبر ⇒ لا أسعار بسبب total_mismatch", () => {
+  const near = pricedFor([{ ...PACK, price: 1.50013 }, CARTON]); // 617.0039 مقابل 617.00
+  assert.equal(near.ok, true, "فرق 0.004 من تقريب الرأس لخانتين");
+  const off = pricedFor([PACK, CARTON], { total: 617.02 });
+  assert.equal(off.ok, false);
+  assert.equal(off.reason, "total_mismatch");
+  assert.equal(off.inv.items.some((i) => "unitPrice" in i), false, "لا أسعار في الفاتورة الراجعة");
+});
+
+test("أسعار الأسطر: معامل مفقود أو وحدة مجهولة أو سطر مخفي ⇒ لا أسعار، بلا تخمين", () => {
+  assert.equal(pricedFor([PACK, { ...CARTON, unit2_fact: 0 }]).reason, "unit_factor_missing");
+  assert.equal(pricedFor([PACK, { ...CARTON, input_unit: 7 }]).reason, "unit_factor_missing");
+  assert.equal(pricedFor([PACK, { ...CARTON, price: "x" }]).reason, "invalid_number");
+  // سطر بلا اسم لا يُعرض لكنه في الإجمالي ⇒ المعروض لا يطابق ⇒ لا أسعار.
+  assert.equal(pricedFor([PACK, CARTON, { ...PACK, item_name: "", qty: 2 }], { total: 620 }).reason, "total_mismatch");
+  assert.equal(pricedFor([], { total: 0 }).reason, "no_lines");
+});
+
+test("القالب المشترك: بلا الخيار الناتج حرفياً كما هو للطباعة التلقائية واليدوية A4", () => {
+  const header = model.headerFromRow(headerRow({ discount: 17, first_pay: 100 }), DEFAULTS);
+  const plain = model.buildInvoice(header, [PACK, CARTON], 250);
+  const priced = priceInvoiceItems(plain, [PACK, CARTON]).inv;
+  const base = template.buildInvoiceHtml(plain);
+  assert.equal(template.buildInvoiceHtml(plain, {}), base);
+  assert.equal(template.buildInvoiceHtml(plain, { linePrices: false }), base);
+  assert.equal(template.buildInvoiceHtml(plain, { linePrices: true }), base, "الخيار بلا أسعار محسوبة لا يغيّر شيئاً");
+  assert.equal(template.buildInvoiceHtml(priced), base, "حقول الأسعار وحدها بلا الخيار لا تغيّر شيئاً");
+  assert.equal(template.buildInvoiceHtml(priced, { linePrices: "yes" }), base, "الخيار صريح true فقط");
+  assert.doesNotMatch(base, /سعر الوحدة/);
+  // الطباعة اليدوية والتلقائية تستدعيان buildInvoiceHtml(inv) بمعامل واحد فقط.
+  for (const f of ["../manual-a4-print/server.js", "../ameen-autoprint/watcher.js"]) {
+    const src = fs.readFileSync(path.join(dir, f), "utf8");
+    assert.match(src, /buildInvoiceHtml\(inv\);/, `${f}: الاستدعاء بلا خيار`);
+    assert.doesNotMatch(src, /linePrices/, `${f}: لا يطلب الأسعار`);
+  }
+});
+
+test("القالب بالخيار: عمودا سعر الوحدة والإجمالي بعملة الفاتورة، وسطر الإجمالي يمتد على 4 أعمدة", () => {
+  const header = model.headerFromRow(headerRow(), DEFAULTS);
+  const priced = priceInvoiceItems(model.buildInvoice(header, [PACK, CARTON], 250), [PACK, CARTON]).inv;
+  const html = template.buildInvoiceHtml(priced, { linePrices: true });
+  assert.match(html, /<th>الكمية<\/th><th class="num">سعر الوحدة<\/th><th class="num">الإجمالي<\/th><\/tr><\/thead>/);
+  assert.match(html, /<td>2 كرتونة<\/td><td class="num"><span dir="ltr">\$ 286<\/span><\/td><td class="num"><span dir="ltr">\$ 572<\/span><\/td>/);
+  assert.match(html, /<td>30 علبة<\/td><td class="num"><span dir="ltr">\$ 1.5<\/span><\/td><td class="num"><span dir="ltr">\$ 45<\/span><\/td>/);
+  assert.match(html, /<td colspan="4">إجمالي الفاتورة<\/td>/);
+  assert.match(html, /tr \{ break-inside:avoid; \}/, "السطر لا ينشطر بين صفحتين");
+  const syp = template.buildInvoiceHtml({ ...priced, currencyIso: "SYP" }, { linePrices: true });
+  assert.match(syp, /<td class="num"><span dir="ltr">286<\/span> ل.س<\/td>/);
+});
+
+test("الأرشيف: مطابقة ⇒ PDF بالأسعار؛ عدم مطابقة ⇒ القالب القديم وسبب في السجل بلا مبالغ ولا أسماء", async () => {
+  const t = await setup({ mode: "dry-run" });
+  const htmls = new Map();
+  const real = t.renderer.render;
+  t.renderer.render = async (html, paper, out) => { htmls.set(/فاتورة رقم (\d+)/.exec(html)[1], html); return real(html, paper, out); };
+  t.ameen.add({ guid: G1, number: 601, total: 617, lines: [PACK, CARTON] });
+  t.ameen.add({ guid: G2, number: 602, total: 999, lines: [PACK, CARTON] });
+  t.advance(300);
+  await t.cycle();
+  assert.equal(t.store.jobs().length, 2);
+  assert.match(htmls.get("601"), /سعر الوحدة/);
+  assert.doesNotMatch(htmls.get("602"), /سعر الوحدة/);
+  assert.match(htmls.get("602"), /<th>الكمية<\/th><\/tr><\/thead>/, "القالب القديم كما هو");
+  const skipped = t.logs.filter((l) => l.event === "line_prices_skipped");
+  assert.equal(skipped.length, 1);
+  assert.deepEqual(Object.keys(skipped[0]).sort(), ["at", "event", "number", "reason"]);
+  assert.deepEqual([skipped[0].number, skipped[0].reason], [602, "total_mismatch"]);
+});
+
+// الأسعار مع الحسم والتدوير (#402) ومبلغ الإشعار (#407): الأسطر تطابق Total (البضاعة) وحده،
+// والملخص Total − الحسم + التدوير يبقى كما هو، والمبلغ = الصافي، والبصمة لا تتأثر بالقالب.
+test("الأرشيف بالأسعار + حسم + تدوير: الأعمدة صحيحة، والصافي والمتبقي والمبلغ كما هي، والبصمة ومنع التكرار بلا تغيير", async () => {
+  const { invoiceVersionHash } = require(path.join(dir, "lib", "fingerprint.js"));
+  const t = await setup();
+  const htmls = new Map();
+  const real = t.renderer.render;
+  t.renderer.render = async (html, paper, out) => { htmls.set(/فاتورة رقم (\d+)/.exec(html)[1], html); return real(html, paper, out); };
+  // 617 − 17 + 0.4 = 600.4؛ المدفوع 100 ⇒ المتبقي 500.4. وفاتورة بتدوير سالب: 617 − 0.4 = 616.6.
+  t.ameen.add({ guid: G1, number: 611, total: 617, discount: 17, totalExtra: 0.4, firstPay: 100, lines: [PACK, CARTON] });
+  t.ameen.add({ guid: G2, number: 612, total: 617, totalExtra: -0.4, lines: [PACK, CARTON] });
+  t.advance(300);
+  await t.cycle();
+  const text = (n) => htmls.get(n).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const a = text("611");
+  assert.match(htmls.get("611"), /<td>2 كرتونة<\/td><td class="num"><span dir="ltr">\$ 286<\/span><\/td><td class="num"><span dir="ltr">\$ 572<\/span><\/td>/);
+  assert.match(htmls.get("611"), /<td>30 علبة<\/td><td class="num"><span dir="ltr">\$ 1.5<\/span><\/td><td class="num"><span dir="ltr">\$ 45<\/span><\/td>/);
+  assert.ok(a.includes("إجمالي الفاتورة $ 617"), "إجمالي البضاعة = مجموع الأسطر");
+  assert.match(a, /الحسم \$ 17 تدوير \$ 0\.4 الصافي \$ 600\.4 المدفوع \$ 100 المتبقي من هذه الفاتورة \$ 500\.4/);
+  assert.match(text("612"), /تدوير \$ -0\.4 الصافي \$ 616\.6/);
+  assert.match(htmls.get("612"), /سعر الوحدة/);
+  const byNumber = (n) => t.store.jobs().find((j) => j.number === n);
+  assert.equal(byNumber(611).amount, 600.4, "المبلغ = الصافي المطبوع");
+  assert.equal(byNumber(612).amount, 616.6);
+  for (const [guid, n] of [[G1, 611], [G2, 612]]) {
+    const row = (await t.ameen.api.changedInvoices({ since: "1900-01-01T00:00:00", dateFrom: "2026-10-01", onlyGuid: guid }))[0];
+    assert.equal(byNumber(n).versionHash, invoiceVersionHash(row, await t.ameen.api.lines(guid)), `${n}: البصمة من الصف الخام`);
+    assert.equal(t.edgeFake.state.items.get(byNumber(n).jobId).amount, byNumber(n).amount, `${n}: سجل الإشعار`);
+  }
+  const sent = t.edgeFake.state.sent.length;
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  assert.equal(t.store.jobs().length, 2, "لا إصدار جديد");
+  assert.equal(t.edgeFake.state.sent.length, sent, "لا إشعار مكرر");
+});
+
 // ─── PDF حقيقي بالقالب الرسمي وخط Cairo (Chromium عبر Playwright إن وُجد) ───
 function playwright() {
   try { return require("playwright"); } catch { return null; }
@@ -1055,4 +1293,475 @@ test("PDF حقيقي: القالب الرسمي A4 وخط Cairo مضمَّن", {
   } finally {
     await browser.close();
   }
+});
+
+test("PDF حقيقي بالأسعار: 45 سطراً بوحدتين مختلفتين + حسم + تدوير، Cairo مضمَّن، عدة صفحات", { skip: !playwright() && "Playwright غير متاح" }, async () => {
+  const pw = playwright();
+  const browser = await pw.chromium.launch();
+  try {
+    let fontOk = false;
+    let pages = 0;
+    let html = "";
+    const renderer = {
+      async render(h, _paper, outPath) {
+        html = h;
+        const page = await browser.newPage();
+        await page.setContent(h, { waitUntil: "load" });
+        await page.evaluate(() => document.fonts.ready);
+        fontOk = await page.evaluate(() => document.fonts.check("700 16px Cairo") && [...document.fonts].some((f) => f.family.replace(/"/g, "") === "Cairo" && f.status === "loaded"));
+        const pdf = await page.pdf({ format: "A4", printBackground: true, margin: { top: "12mm", bottom: "12mm", left: "12mm", right: "12mm" }, path: outPath });
+        await page.close();
+        pages = (pdf.toString("latin1").match(/\/Type\s*\/Page(?![s\w])/g) || []).length;
+        return { fontOk, pages, bytes: pdf.length };
+      },
+    };
+    const lines = Array.from({ length: 45 }, (_, i) => ({ ...(i % 2 ? CARTON : PACK), item_name: `صنف ${i + 1}`, line_guid: `eeeeeeee-0000-4000-8000-${String(i).padStart(12, "0")}` }));
+    const total = lines.reduce((s, l) => s + (l.price * l.qty) / (l.input_unit === 2 ? l.unit2_fact : 1), 0); // 23×45 + 22×572
+    const dataDir = tmp();
+    const ameen = fakes.createFakeAmeen();
+    ameen.add({ guid: G1, number: 778, customer: "زبون اختبار", total, discount: 10, totalExtra: 0.25, lines });
+    ameen.setNow("2026-10-24T12:10:00");
+    const store = createStore(dataDir);
+    const cfg = validate({ ...DEFAULTS, archiveFrom: "2026-10-01", dataDir });
+    const archiver = createArchiver({ cfg, store, ameen: ameen.api, renderer, template, paper: paperFor("A4", { papers: ["A4"] }), getDrive: () => null, edge: null, log: () => {} });
+    await archiver.cycle();
+    const [job] = store.jobs();
+    assert.ok(job, "مهمة واحدة");
+    assert.equal(fontOk, true, "Cairo محمَّل");
+    assert.ok(pages >= 2, `عدة صفحات (${pages})`);
+    assert.equal((html.match(/<td class="num">/g) || []).length, 90, "سعر وإجمالي لكل سطر من 45");
+    assert.equal(job.amount, Math.round((total - 10 + 0.25) * 1000) / 1000, "المبلغ = الصافي");
+    const pdf = fs.readFileSync(store.pdfPath(job.jobId));
+    assert.match(pdf.toString("latin1"), /Cairo/, "الخط مضمَّن في الملف");
+  } finally {
+    await browser.close();
+  }
+});
+
+// ─── نطاق الإنتاج: الفواتير الجديدة وحدها بعد لحظة التفعيل ───
+const G5 = "55555555-5555-4555-8555-555555555551";
+const G6 = "66666666-6666-4666-8666-666666666661";
+const G7 = "77777777-7777-4777-8777-777777777771";
+const { readBaseline, BASELINE_SCHEMA } = require(path.join(dir, "lib", "config.js"));
+const { snapshotBaseline } = require(path.join(dir, "worker.js"));
+
+test("نطاق الإنتاج: الرفع أو الإرسال بلا حصر تجربة يتطلب لحظة التفعيل ولقطة الأساس ببصمتها", () => {
+  const base = { ...DEFAULTS, archiveFrom: "2026-10-25", edgeUrl: "https://x.supabase.co/functions/v1/document-archive-notify" };
+  const prod = { newInvoicesFrom: "2026-10-31T16:00:00", baselineFile: "C:\\b.json", baselineSha256: "a".repeat(64) };
+  for (const mode of ["drive", "live"]) {
+    assert.throws(() => validate({ ...base, mode }), /newInvoicesFrom/, `${mode} بلا نطاق إنتاج مرفوض`);
+    assert.doesNotThrow(() => validate({ ...base, mode, ...prod }));
+  }
+  assert.doesNotThrow(() => validate({ ...base, mode: "dry-run" }), "dry-run بلا نطاق كما كان");
+  const pilotOk = { ...base, mode: "live", pilotInvoiceGuids: [G1], pilotExpiresAt: dayOf(Date.now() + DAY) };
+  assert.doesNotThrow(() => validate(pilotOk), "التجربة المحصورة كما كانت");
+  assert.throws(() => validate({ ...base, mode: "live", ...prod, newInvoicesFrom: "2026-10-31" }), /YYYY-MM-DDTHH:MM:SS/);
+  assert.throws(() => validate({ ...base, mode: "live", ...prod, newInvoicesFrom: "2026-10-31T16:00:00Z" }), /YYYY-MM-DDTHH:MM:SS/);
+  assert.throws(() => validate({ ...base, mode: "live", ...prod, baselineFile: "" }), /baselineFile/);
+  assert.throws(() => validate({ ...base, mode: "live", ...prod, baselineSha256: "ABC" }), /baselineSha256/);
+  assert.throws(() => validate({ ...base, baselineFile: "C:\\b.json" }), /بلا newInvoicesFrom/);
+});
+
+test("لقطة الأساس: --baseline تكتب ملفاً جديداً فقط، والإعداد يرفض أي لقطة تالفة أو مختلفة", async () => {
+  const ameen = fakes.createFakeAmeen();
+  ameen.add({ guid: G1, number: 1 });
+  ameen.add({ guid: G2, number: 2, posted: 0 }); // غير مرحّلة الآن: تبقى قديمة ولو رُحّلت لاحقاً
+  ameen.add({ guid: G3, number: 3, typeGuid: fakes.CASHIER });
+  const d = tmp();
+  const file = path.join(d, "baseline.json");
+  const out = await snapshotBaseline({ ...DEFAULTS }, file, ameen.api);
+  assert.equal(out.count, 2, "نوع الجملة وحده، بأي حالة ترحيل");
+  assert.equal(out.newInvoicesFrom, "2026-10-24T12:00:00", "لحظة التفعيل بساعة SQL");
+  assert.equal(out.createdAtOrAfter, 2, "ما أُنشئ في الثانية نفسها يُذكر ولا يُؤرشف");
+  await assert.rejects(snapshotBaseline({ ...DEFAULTS }, file, ameen.api), /لا كتابة فوقه/);
+  const cfg = { newInvoicesFrom: out.newInvoicesFrom, baselineFile: file, baselineSha256: out.baselineSha256 };
+  assert.deepEqual(readBaseline(cfg), [G1, G2].sort());
+  assert.throws(() => readBaseline({ ...cfg, baselineSha256: "0".repeat(64) }), /لا تطابق/);
+  assert.throws(() => readBaseline({ ...cfg, newInvoicesFrom: "2026-10-24T12:00:01" }), /للحظة غير/);
+  const bad = (doc) => {
+    const f = path.join(d, `b-${Math.random()}.json`);
+    fs.writeFileSync(f, JSON.stringify(doc));
+    return { newInvoicesFrom: "2026-10-24T12:00:00", baselineFile: f, baselineSha256: require("crypto").createHash("sha256").update(fs.readFileSync(f)).digest("hex") };
+  };
+  const ok = { schema: BASELINE_SCHEMA, newInvoicesFrom: "2026-10-24T12:00:00", count: 1, guids: [G1] };
+  assert.doesNotThrow(() => readBaseline(bad(ok)));
+  assert.throws(() => readBaseline(bad({ ...ok, count: 2 })), /count/);
+  assert.throws(() => readBaseline(bad({ ...ok, guids: ["1147"] })), /GUID/);
+  assert.throws(() => readBaseline(bad({ ...ok, schema: 9 })), /مخطط/);
+  assert.throws(() => readBaseline(bad({ ...ok, guids: undefined })), /guids/);
+});
+
+test("نطاق الإنتاج: لا فاتورة سبقت التفعيل تُؤرشف أو يُرسل عنها مهما عُدّلت، والجديدة إشعار واحد", async () => {
+  // قبل التفعيل: G1 قديمة عادية، G2 بتاريخ مستقبلي، G3 غير مرحّلة، G4 أُنشئت في ثانية اللقطة.
+  const pre = fakes.createFakeAmeen();
+  pre.setNow("2026-10-31T09:00:00");
+  pre.add({ guid: G1, number: 1101 });
+  pre.add({ guid: G2, number: 1102, date: "2026-11-05" });
+  pre.add({ guid: G3, number: 1103, posted: 0 });
+  pre.setNow("2026-10-31T16:00:00");
+  pre.add({ guid: G4, number: 1104 });
+  const d = tmp();
+  const snap = await snapshotBaseline({ ...DEFAULTS }, path.join(d, "baseline.json"), pre.api);
+  assert.equal(snap.count, 4);
+  const baselineGuids = readBaseline({ newInvoicesFrom: snap.newInvoicesFrom, baselineFile: snap.file, baselineSha256: snap.baselineSha256 });
+
+  const t = await setup({ overrides: { archiveFrom: "2026-10-25", newInvoicesFrom: snap.newInvoicesFrom, baselineGuids } });
+  t.ameen.setNow("2026-10-31T09:00:00");
+  for (const g of [G1, G2, G3]) t.ameen.add({ ...pre.db.invoices.get(g) });
+  t.ameen.setNow("2026-10-31T16:00:00");
+  t.ameen.add({ ...pre.db.invoices.get(G4) });
+  // بعد التفعيل: G5 جديدة؛ G6 من نوع آخر أُنشئت قبل التفعيل ثم صارت جملة (خارج اللقطة، يستبعدها CreateDate).
+  t.ameen.setNow("2026-10-31T08:00:00");
+  t.ameen.add({ guid: G6, number: 1106, typeGuid: fakes.CASHIER });
+  t.ameen.setNow("2026-10-31T16:05:00");
+  t.ameen.add({ guid: G5, number: 1105 });
+  t.ameen.edit(G1, { total: 999, date: "2026-11-01" }); // تعديل + تغيير تاريخ بعد التفعيل
+  t.ameen.edit(G3, { posted: 1 });                       // ترحيل بعد التفعيل
+  t.ameen.edit(G6, { typeGuid: fakes.WHOLESALE });
+  // فاتورة قديمة «يعيدها» المصدر رغم الحدّ (حماية مزدوجة): وقت إنشاء قبل التفعيل ⇒ لا شيء.
+  t.ameen.setNow("2026-10-31T09:30:00");
+  t.ameen.add({ guid: G7, number: 1107 });
+  const realChanged = t.ameen.api.changedInvoices;
+  t.ameen.api.changedInvoices = async (args) => {
+    const rows = await realChanged(args);
+    const leak = await realChanged({ ...args, createdFrom: null });
+    return [...rows, ...leak.filter((r) => r.invoice_guid === G7)];
+  };
+  t.ameen.setNow("2026-10-31T16:05:00");
+  t.advance(300);
+  for (let i = 0; i < 4; i++) { await t.cycle(); t.advance(1900); }
+
+  const jobs = t.store.jobs();
+  assert.deepEqual(jobs.map((j) => j.number), [1105], "الجديدة وحدها لها مهمة");
+  assert.equal(jobs[0].status, "notified");
+  assert.equal(t.edgeFake.state.sent.length, 1, "إشعار واحد فقط");
+  assert.equal(t.drive.pdfFiles().length, 1, "ملف Drive واحد فقط");
+  const reported = t.edgeFake.state.reports.flatMap((r) => r.items.map((i) => i.doc_number));
+  assert.ok(reported.length > 0 && reported.every((n) => n === "1105"), "التقرير لا يحمل فاتورة قديمة");
+  const out = await t.cycle();
+  assert.deepEqual(out.scope, { newInvoicesFrom: "2026-10-31T16:00:00", baseline: 4 });
+});
+
+test("نطاق الإنتاج: مهمة قائمة لفاتورة في لقطة الأساس (من التجربة) لا تُرفع ولا يُرسل عنها ولا تُبلَّغ", async () => {
+  const t = await setup({ mode: "drive" });
+  t.ameen.add({ guid: G1, number: 1147 });
+  t.advance(300);
+  await t.cycle();
+  const [job] = t.store.jobs();
+  assert.equal(job.status, "uploaded");
+  const sentBefore = t.edgeFake.state.sent.length;
+  Object.assign(t.cfg, { mode: "live", newInvoicesFrom: "2026-10-24T13:00:00", baselineGuids: [G1] });
+  t.restart();
+  t.advance(400);
+  const reportsBefore = t.edgeFake.state.reports.length;
+  await t.cycle();
+  assert.equal(t.store.get(job.jobId).status, "uploaded", "بقيت كما هي");
+  assert.equal(t.edgeFake.state.sent.length, sentBefore, "لا إشعار");
+  assert.ok(t.edgeFake.state.reports.slice(reportsBefore).every((r) => r.items.length === 0), "لا تبليغ عنها");
+});
+
+// ─── تحديث جماعي: فواتير جملة معدَّلة كثيرة معاً ⇒ رسالة ملخص واحدة (حادثة 2026-11-09) ───
+const BG = [G1, G2, G3, G4, "55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666"];
+
+async function addAndArchive(t, guids, numberBase) {
+  for (let i = 0; i < guids.length; i++) t.ameen.add({ guid: guids[i], number: numberBase + i });
+  t.advance(300);
+  await t.cycle();
+}
+
+test("تعديل فاتورة واحدة أو عدد ضمن الحدّ معاً ⇒ إشعار فردي مستقل لكل واحدة بلا تجميع", async () => {
+  const t = await setup();
+  const guids = BG.slice(0, 5); // = cfg.burstNotifyThreshold الافتراضي
+  await addAndArchive(t, guids, 1200);
+  const sentBefore = t.edgeFake.state.sent.length;
+  const notifyCallsBefore = t.edgeFake.state.notifyCalls;
+  for (const g of guids) t.ameen.edit(g, { total: 150 });
+  t.advance(300);
+  await t.cycle();
+  assert.ok(!t.edgeFake.state.notifyBatchCalls, "لم تُستعمل دالة التجميع");
+  assert.equal(t.edgeFake.state.notifyCalls - notifyCallsBefore, 5, "خمس محاولات إشعار فردية");
+  const sent = t.edgeFake.state.sent.slice(sentBefore);
+  assert.equal(sent.length, 5);
+  assert.ok(sent.every((s) => !s.batch));
+  for (const g of guids) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.version, 2);
+    assert.equal(v2.status, "notified");
+  }
+});
+
+test("تحديث جماعي: فواتير جملة معدَّلة معاً أكثر من الحدّ ⇒ رسالة ملخص واحدة بدل إشعار كل فاتورة", async () => {
+  const t = await setup();
+  const guids = BG; // 6 > الحدّ الافتراضي 5
+  await addAndArchive(t, guids, 1300);
+  const notifyCallsBefore = t.edgeFake.state.notifyCalls;
+  for (const g of guids) t.ameen.edit(g, { total: 180 });
+  t.advance(300);
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls, 1, "دفعة واحدة بدل ست محاولات");
+  assert.equal(t.edgeFake.state.notifyCalls, notifyCallsBefore, "لا إشعار فردي لهذه الدورة");
+  const batch = t.edgeFake.state.sent.at(-1);
+  assert.equal(batch.batch, true);
+  assert.match(batch.text, /6/);
+  for (let i = 0; i < guids.length; i++) assert.ok(batch.text.includes(String(1300 + i)), `رقم ${1300 + i} في الملخص`);
+  for (const g of guids) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.version, 2);
+    assert.equal(v2.status, "notified");
+    assert.equal(v2.telegram.messageId, batch.messageId);
+    assert.equal(v2.telegram.duplicate, false);
+  }
+});
+
+test("فاتورة جديدة لا تُجمَّع أبداً، حتى مع تحديث جماعي لفواتير أخرى في الدورة نفسها", async () => {
+  const t = await setup({ overrides: { burstNotifyThreshold: 1 } });
+  const edited = [G1, G2];
+  await addAndArchive(t, edited, 1400);
+  const sentBefore = t.edgeFake.state.sent.length;
+  const notifyCallsBefore = t.edgeFake.state.notifyCalls;
+  for (const g of edited) t.ameen.edit(g, { total: 190 });
+  t.ameen.add({ guid: G3, number: 1402 }); // فاتورة جديدة في الدورة نفسها
+  t.advance(300);
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls, 1, "التعديلان معاً (2 > 1) دفعة واحدة");
+  const sent = t.edgeFake.state.sent.slice(sentBefore);
+  const batch = sent.find((s) => s.batch);
+  const individual = sent.filter((s) => !s.batch);
+  assert.ok(batch, "رسالة ملخص للتعديلين");
+  assert.match(batch.text, /2/);
+  assert.ok(!batch.text.includes("1402"), "الفاتورة الجديدة ليست في الملخص");
+  assert.equal(individual.length, 1, "الفاتورة الجديدة وحدها إشعار فردي مستقل");
+  assert.equal(t.edgeFake.state.notifyCalls - notifyCallsBefore, 1);
+  const newJob = t.store.latestVersion("wholesale_invoice", G3);
+  assert.equal(newJob.version, 1);
+  assert.equal(newJob.status, "notified");
+  assert.equal(newJob.telegram.messageId, individual[0].messageId);
+});
+
+test("حدّ التجميع: بالضبط عند الحدّ إشعار فردي، وفوقه بواحد تجميع", async () => {
+  const t = await setup({ overrides: { burstNotifyThreshold: 3 } });
+  const guids = BG.slice(0, 4);
+  await addAndArchive(t, guids, 1500);
+  // عند الحدّ بالضبط (3 = 3): فردي
+  const atThreshold = guids.slice(0, 3);
+  for (const g of atThreshold) t.ameen.edit(g, { total: 200 });
+  t.advance(300);
+  await t.cycle();
+  assert.ok(!t.edgeFake.state.notifyBatchCalls, "3 = الحدّ: لا تجميع");
+  for (const g of atThreshold) assert.equal(t.store.latestVersion("wholesale_invoice", g).version, 2);
+  // فوق الحدّ بواحد (4 > 3): تجميع
+  for (const g of guids) t.ameen.edit(g, { total: 210 });
+  t.advance(300);
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls, 1, "4 > الحدّ: دفعة واحدة");
+  for (const g of atThreshold) assert.equal(t.store.latestVersion("wholesale_invoice", g).version, 3, "عُدِّلت مرتين");
+  assert.equal(t.store.latestVersion("wholesale_invoice", guids[3]).version, 2, "عُدِّلت مرة واحدة فقط");
+});
+
+test("تعارض حجز قائم (in_progress) على الدفعة لا يُرسل الملخص مرتين: انتظار ثم إرسال واحد في الدورة التالية", async () => {
+  const t = await setup({ overrides: { burstNotifyThreshold: 1 } });
+  const guids = [G1, G2];
+  await addAndArchive(t, guids, 1600);
+  for (const g of guids) t.ameen.edit(g, { total: 220 });
+  t.advance(300);
+  t.edgeFake.state.conflict = ["in_progress"];
+  const sentBefore = t.edgeFake.state.sent.length;
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls, 1);
+  assert.equal(t.edgeFake.state.sent.length, sentBefore, "لم يُرسل شيء: الحجز قائم من محاولة متزامنة");
+  for (const g of guids) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.status, "uploaded", "لم تُعلَّم notified");
+    assert.equal(v2.failed, false, "لا فشل: انتظار بلا استهلاك محاولة");
+    assert.ok(v2.nextAttemptAt > Date.parse("2026-10-24T12:05:00Z"));
+  }
+  t.advance(t.cfg.notifyWaitSeconds + 5);
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls, 2, "محاولة ثانية في الدورة التالية");
+  const batch = t.edgeFake.state.sent.at(-1);
+  assert.equal(batch.batch, true);
+  for (const g of guids) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.status, "notified");
+    assert.equal(v2.telegram.messageId, batch.messageId);
+  }
+  assert.equal(t.edgeFake.state.sent.length, sentBefore + 1, "رسالة ملخص واحدة فقط رغم محاولتين");
+});
+
+// توليد guids صالحة فريدة بالعدد المطلوب لاختبارات المقياس (1/10/74/100) بلا تكرار BG المحدودة (6 فقط).
+function manyGuids(n, seed = 1) {
+  const guids = [];
+  for (let i = 0; i < n; i++) {
+    const v = seed + i;
+    const a = v.toString(16).padStart(8, "0").slice(-8);
+    const b = (v + 1).toString(16).padStart(4, "0").slice(-4);
+    const c = (v + 2).toString(16).padStart(3, "0").slice(-3);
+    const d = (v + 3).toString(16).padStart(3, "0").slice(-3);
+    const e = (v + 4).toString(16).padStart(12, "0").slice(-12);
+    guids.push(`${a}-${b}-4${c}-8${d}-${e}`);
+  }
+  return guids;
+}
+
+// مقياس حادثة 2026-11-09: بالضبط 1/10/74 (الحجم الحقيقي)/100 فاتورة معدَّلة في الدورة نفسها.
+// 1-5 (≤ cfg.burstNotifyThreshold الافتراضي) إشعار فردي مستقل؛ 10/74/100 (> الحدّ) رسالة ملخص
+// واحدة، وتبقى تحت حدّ تيليغرام 4096 محرفاً بلا أي تقسيم (أرقام فواتير حقيقية قصيرة).
+for (const n of [1, 10, 74, 100]) {
+  test(`مقياس حادثة 2026-11-09: بالضبط ${n} فاتورة معدَّلة في الدورة نفسها ⇒ ${n <= 5 ? "إشعار فردي" : "رسالة ملخص واحدة بلا تقسيم"}`, async () => {
+    const t = await setup();
+    const guids = manyGuids(n, 9000 + n * 1000);
+    await addAndArchive(t, guids, 1700 + n);
+    const sentBefore = t.edgeFake.state.sent.length;
+    const notifyCallsBefore = t.edgeFake.state.notifyCalls;
+    const batchCallsBefore = t.edgeFake.state.notifyBatchCalls || 0;
+    for (const g of guids) t.ameen.edit(g, { total: 150 + n });
+    t.advance(300);
+    await t.cycle();
+    const sent = t.edgeFake.state.sent.slice(sentBefore);
+    if (n <= 5) {
+      assert.equal(t.edgeFake.state.notifyBatchCalls || 0, batchCallsBefore, "ضمن الحدّ: بلا تجميع");
+      assert.equal(t.edgeFake.state.notifyCalls - notifyCallsBefore, n, `${n} محاولة إشعار فردية`);
+      assert.equal(sent.length, n);
+      assert.ok(sent.every((s) => !s.batch));
+      if (n === 1) assert.match(sent[0].caption || sent[0].text || "", /معدّلة/, "وصف «فاتورة معدّلة» في الإشعار الفردي");
+    } else {
+      assert.equal(t.edgeFake.state.notifyBatchCalls, batchCallsBefore + 1, "دفعة واحدة فقط بدل محاولة لكل فاتورة");
+      assert.equal(t.edgeFake.state.notifyCalls, notifyCallsBefore, "لا إشعار فردي لهذه الدورة");
+      const batch = sent.find((s) => s.batch);
+      assert.ok(batch, "رسالة ملخص واحدة");
+      assert.ok(batch.text.length < 4096, `${n} فاتورة: الرسالة تحت حدّ تيليغرام بلا تقسيم (${batch.text.length} محرف)`);
+      assert.match(batch.text, new RegExp(String(n)));
+      for (let i = 0; i < guids.length; i++) assert.ok(batch.text.includes(String(1700 + n + i)), `رقم ${1700 + n + i} في الملخص`);
+    }
+    for (const g of guids) {
+      const v2 = t.store.latestVersion("wholesale_invoice", g);
+      assert.equal(v2.version, 2);
+      assert.equal(v2.status, "notified", `${g} لم تُعلَّم notified`);
+    }
+  });
+}
+
+
+// ─── حادثة 2026-11-09 — إصلاح Codex P1 (`batch_too_large`, PR #437): تقسيم BATCH_MAX_ITEMS=200 ───
+// دالة Edge الحقيقية (document-archive-notify/index.ts) ترفض أي /notify-batch يتجاوز 200 عنصراً
+// بخطأ batch_too_large كاملاً؛ الآن العميل (notifyBatchStage) يقسّم تلقائياً أي دفعة أكبر إلى
+// عدة طلبات متتالية ≤200 عنصر، فتنجح العملية بالكامل مهما كان العدد دون فقدان أي إشعار.
+for (const [n, expectedChunks] of [[199, 1], [200, 1], [201, 2], [400, 2], [401, 3], [1000, 5]]) {
+  test(`تقسيم BATCH_MAX_ITEMS=200 (Codex P1): ${n} فاتورة معدَّلة معاً ⇒ ${expectedChunks} طلب/طلبات /notify-batch، صفر فقدان`, async () => {
+    const t = await setup();
+    const guids = manyGuids(n, 30000 + n * 10);
+    await addAndArchive(t, guids, 1900 + n);
+    const notifyCallsBefore = t.edgeFake.state.notifyCalls;
+    const batchCallsBefore = t.edgeFake.state.notifyBatchCalls || 0;
+    const sentBefore = t.edgeFake.state.sent.length;
+    for (const g of guids) t.ameen.edit(g, { total: 300 + n });
+    t.advance(300);
+    await t.cycle();
+    assert.equal((t.edgeFake.state.notifyBatchCalls || 0) - batchCallsBefore, expectedChunks, `${n} عنصر ⇒ ${expectedChunks} طلب /notify-batch`);
+    assert.equal(t.edgeFake.state.notifyCalls, notifyCallsBefore, "لا إشعار فردي لهذه الدورة");
+    const batches = t.edgeFake.state.sent.slice(sentBefore).filter((s) => s.batch);
+    assert.equal(batches.length, expectedChunks, "عدد رسائل الدفعات = عدد الدفعات");
+    for (let i = 0; i < expectedChunks; i++) {
+      const expectedCount = i < expectedChunks - 1 ? 200 : n - 200 * (expectedChunks - 1);
+      assert.match(batches[i].text, new RegExp(`— ${expectedCount} `), `الدفعة ${i + 1}: ${expectedCount} عنصر`);
+    }
+    for (const g of guids) {
+      const v2 = t.store.latestVersion("wholesale_invoice", g);
+      assert.equal(v2.version, 2);
+      assert.equal(v2.status, "notified", `${g} لم تُعلَّم notified — فقدان إشعار`);
+      assert.ok(v2.telegram && Number.isFinite(v2.telegram.messageId), `${g} بلا رقم رسالة`);
+    }
+  });
+}
+
+test("فشل شبكة أثناء إرسال دفعة وسطى لا يمسّ الدفعات الناجحة قبلها وبعدها، وتُعاد محاولة الفاشلة فقط لاحقاً دون تكرار", async () => {
+  const t = await setup();
+  const n = 401; // 200 + 200 + 1: ثلاث دفعات
+  const guids = manyGuids(n, 40000);
+  await addAndArchive(t, guids, 2100);
+  for (const g of guids) t.ameen.edit(g, { total: 500 });
+  t.advance(300);
+  t.edgeFake.state.rejectBatchCall = (t.edgeFake.state.notifyBatchCalls || 0) + 2; // الدفعة الوسطى (الثانية من ثلاث)
+  const sentBefore = t.edgeFake.state.sent.length;
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls, 3, "ثلاث محاولات /notify-batch رغم فشل الوسطى (502 عابر لا عطل عام)");
+  const batches = t.edgeFake.state.sent.slice(sentBefore).filter((s) => s.batch);
+  assert.equal(batches.length, 2, "دفعتان نجحتا فقط (الأولى والأخيرة)؛ الوسطى فشلت ولم تُرسل");
+  const chunk1 = guids.slice(0, 200);
+  const chunk2 = guids.slice(200, 400);
+  const chunk3 = guids.slice(400, 401);
+  for (const g of chunk1) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.status, "notified", "الدفعة الأولى (ناجحة) لم تتأثر بفشل الوسطى");
+  }
+  for (const g of chunk3) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.status, "notified", "الدفعة الأخيرة (ناجحة) لم تتأثر بفشل الوسطى");
+  }
+  for (const g of chunk2) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.status, "uploaded", "الدفعة الوسطى الفاشلة لم تُعلَّم notified");
+    assert.equal(v2.failed, false, "لم تستهلك كل محاولاتها بعد: ستُعاد المحاولة لاحقاً");
+    assert.equal(v2.attempts, 1, "محاولة واحدة فقط استُهلكت للدفعة الفاشلة");
+  }
+  const msgIds = new Set(batches.map((b) => b.messageId));
+  assert.equal(msgIds.size, 2, "رقما رسالة مختلفان للدفعتين الناجحتين، بلا تكرار");
+
+  // الدورة التالية: إعادة محاولة الدفعة الفاشلة فقط، دون إعادة إرسال أو تكرار للدفعتين الناجحتين
+  t.edgeFake.state.rejectBatchCall = null;
+  t.advance(3600);
+  const sentBefore2 = t.edgeFake.state.sent.length;
+  const batchCallsBefore2 = t.edgeFake.state.notifyBatchCalls;
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls - batchCallsBefore2, 1, "محاولة واحدة فقط: الدفعة الفاشلة وحدها");
+  const retried = t.edgeFake.state.sent.slice(sentBefore2).filter((s) => s.batch);
+  assert.equal(retried.length, 1, "رسالة دفعة واحدة فقط لإعادة المحاولة");
+  for (const g of chunk2) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.status, "notified", "الدفعة الفاشلة أُرسلت بنجاح في إعادة المحاولة");
+  }
+  assert.equal(t.edgeFake.state.sent.filter((s) => s.batch).length, 3, "ثلاث رسائل دفعة إجمالاً عبر الدورتين: لا تكرار لأي دفعة");
+});
+
+test("تشغيل متزامن (محاكاة عامل آخر يحجز دفعة بالتوازي) مع تقسيم 200: لا ازدواج إرسال لنفس الدفعة، والدفعات الأخرى تنجح بلا تأثر", async () => {
+  const t = await setup();
+  const n = 401; // 200 + 200 + 1
+  const guids = manyGuids(n, 50000);
+  await addAndArchive(t, guids, 2600);
+  for (const g of guids) t.ameen.edit(g, { total: 600 });
+  t.advance(300);
+  t.edgeFake.state.conflict = ["in_progress"]; // الدفعة الأولى: حجز قائم من تشغيل متزامن آخر
+  const sentBefore = t.edgeFake.state.sent.length;
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls, 3, "ثلاث محاولات /notify-batch رغم تعارض الحجز على الأولى");
+  const batches = t.edgeFake.state.sent.slice(sentBefore).filter((s) => s.batch);
+  assert.equal(batches.length, 2, "دفعتان فقط أُرسلتا فعلياً (الثانية والثالثة)؛ الأولى محجوزة من تشغيل آخر فلم تُرسل هنا");
+  const chunk1 = guids.slice(0, 200);
+  const chunk2 = guids.slice(200, 400);
+  const chunk3 = guids.slice(400, 401);
+  for (const g of chunk1) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.status, "uploaded", "الدفعة الأولى: انتظار فقط، لا إرسال مزدوج لها من هذا التشغيل");
+    assert.equal(v2.failed, false, "تعارض in_progress لا يستهلك محاولة");
+  }
+  for (const g of [...chunk2, ...chunk3]) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.status, "notified", "الدفعتان غير المتعارضتين نجحتا بلا تأثر بتعارض الأولى");
+  }
+  const msgIds = new Set(batches.map((b) => b.messageId));
+  assert.equal(msgIds.size, 2, "رقما رسالة مختلفان، بلا تكرار لنفس الرسالة بين الدفعتين");
+
+  // الدورة التالية: الحجز المتزامن انتهى ⇒ الدفعة الأولى (فقط) تُرسل مرة واحدة، دون إعادة إرسال الدفعتين الأخريين
+  t.advance(t.cfg.notifyWaitSeconds + 5);
+  const sentBefore2 = t.edgeFake.state.sent.length;
+  const batchCallsBefore2 = t.edgeFake.state.notifyBatchCalls;
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls - batchCallsBefore2, 1, "محاولة واحدة فقط: الدفعة التي كانت محجوزة");
+  const retried = t.edgeFake.state.sent.slice(sentBefore2).filter((s) => s.batch);
+  assert.equal(retried.length, 1);
+  for (const g of chunk1) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.status, "notified", "الدفعة الأولى أُرسلت بنجاح بعد انتهاء التعارض");
+  }
+  assert.equal(t.edgeFake.state.sent.filter((s) => s.batch).length, 3, "ثلاث رسائل دفعة إجمالاً فقط عبر الدورتين: لا ازدواج لأي دفعة");
 });

@@ -130,7 +130,10 @@ const SECRET_INVENTORY = {
   "stock-priority-alerts.yml": [SECRET],
   "alert-on-automation-failure.yml": [SECRET],
   "pages.yml": ["ROLLBAR_POST_CLIENT_ITEM_TOKEN"],
-  "windows-release.yml": ["RELEASE_APP_ID", "RELEASE_APP_PRIVATE_KEY"]
+  "windows-release.yml": ["RELEASE_APP_ID", "RELEASE_APP_PRIVATE_KEY"],
+  // OZK Auto-Repair (#432): سرّ Claude واحد فقط يُضبط عند التفعيل؛ يُمرَّر لخطوة Claude وحدها (بلا shell)،
+  // ولا يُنفَّذ أي كود من الفرع في هذا الـworkflow. غير موجودين على GitHub حتى قرار المالك.
+  "ozk-autorepair.yml": ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]
 };
 for (const f of files) {
   const src = stripComments(readFileSync(path.join(wfDir, f), "utf8"));

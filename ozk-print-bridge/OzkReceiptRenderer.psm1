@@ -163,6 +163,65 @@ $script:ReceiptMaxHeight = 15000
 $script:CashierPrinterName = "XPRINTER XP-T80Q 80MM"
 $script:Invariant = [Globalization.CultureInfo]::InvariantCulture
 
+# ── تقسيم صورة الإيصال إلى أوامر GS v 0 أصغر (بلا أي تغيير في البكسلات) ─────────
+# GS v 0 m xL xH yL yH d1…dk، حيث k = (xL + xH×256) × (yL + yH×256) (مرجع Epson/Citizen ESC/POS).
+# كان الإيصال يُرسل حِزَماً من 512 صفاً (36,864 بايتاً للأمر). مخزن استقبال XP-T80Q ‏64 KB (مواصفة
+# البائع)، فحِزمتان متتاليتان (73,728 بايتاً) تتجاوزانه، والرموز العشوائية في حادثتَي 2992 و2999
+# بدأت عند بداية الحِزمة الثالثة بالضبط. هنا تُعاد كتابة البايتات نفسها بأوامر أصغر:
+# - نفس أمرَي التهيئة (ESC @، GS L، GS W) ونفس أمر القص (GS V 66 0) حرفياً.
+# - نفس صفوف البيانات بالترتيب والبايت؛ الطابعة تتقدّم بعدد الصفوف المعلن فتتصل الحِزَم بلا فاصل.
+# - لا بايتات صفرية ولا أوامر مزامنة إضافية.
+# أي بنية غير متوقعة في المدخل ⇒ استثناء صريح، ولا إرسال.
+$script:ReceiptBandRows = 128
+
+function ConvertTo-OzkBandedRaster([byte[]]$Payload, [int]$BandRows) {
+    if ($BandRows -lt 1 -or $BandRows -gt 2303) { throw "BandRows must be between 1 and 2303." }
+    $prefix = [byte[]](0x1B, 0x40, 0x1D, 0x4C, 0x00, 0x00, 0x1D, 0x57, 0x40, 0x02)
+    $suffix = [byte[]](0x1D, 0x56, 0x42, 0x00)
+    if ($null -eq $Payload -or $Payload.Length -lt ($prefix.Length + 8 + $suffix.Length)) { throw "Receipt payload is too short to be a raster receipt." }
+    for ($j = 0; $j -lt $prefix.Length; $j++) { if ($Payload[$j] -ne $prefix[$j]) { throw "Receipt payload does not start with the expected initialisation." } }
+    for ($j = 0; $j -lt $suffix.Length; $j++) { if ($Payload[$Payload.Length - $suffix.Length + $j] -ne $suffix[$j]) { throw "Receipt payload does not end with the expected cut command." } }
+    $end = $Payload.Length - $suffix.Length
+    $width = -1
+    $blocks = New-Object System.Collections.Generic.List[int[]]
+    $rows = 0
+    $i = $prefix.Length
+    while ($i -lt $end) {
+        if ($i + 8 -gt $end -or $Payload[$i] -ne 0x1D -or $Payload[$i + 1] -ne 0x76 -or $Payload[$i + 2] -ne 0x30 -or $Payload[$i + 3] -ne 0x00) {
+            throw "Unexpected bytes at offset $i inside the raster section."
+        }
+        $w = [int]$Payload[$i + 4] + 256 * [int]$Payload[$i + 5]
+        $h = [int]$Payload[$i + 6] + 256 * [int]$Payload[$i + 7]
+        if ($w -le 0 -or $h -le 0) { throw "Empty raster block at offset $i." }
+        if ($width -lt 0) { $width = $w } elseif ($w -ne $width) { throw "Raster blocks disagree on width." }
+        $k = $w * $h
+        if ($i + 8 + $k -gt $end) { throw "Raster block at offset $i is truncated." }
+        $blocks.Add([int[]]@(($i + 8), $k))
+        $rows += $h
+        $i += 8 + $k
+    }
+    if ($rows -le 0) { throw "Receipt payload has no raster rows." }
+    $raster = New-Object byte[] ($rows * $width)
+    $at = 0
+    foreach ($block in $blocks) { [Buffer]::BlockCopy($Payload, $block[0], $raster, $at, $block[1]); $at += $block[1] }
+    $bandCount = [int][math]::Ceiling($rows / [double]$BandRows)
+    $out = New-Object byte[] ($prefix.Length + $bandCount * 8 + $raster.Length + $suffix.Length)
+    [Buffer]::BlockCopy($prefix, 0, $out, 0, $prefix.Length)
+    $o = $prefix.Length
+    $row = 0
+    while ($row -lt $rows) {
+        $n = [math]::Min($BandRows, $rows - $row)
+        $out[$o] = 0x1D; $out[$o + 1] = 0x76; $out[$o + 2] = 0x30; $out[$o + 3] = 0x00
+        $out[$o + 4] = [byte]($width -band 0xFF); $out[$o + 5] = [byte]($width -shr 8)
+        $out[$o + 6] = [byte]($n -band 0xFF); $out[$o + 7] = [byte]($n -shr 8)
+        [Buffer]::BlockCopy($raster, $row * $width, $out, $o + 8, $n * $width)
+        $o += 8 + $n * $width
+        $row += $n
+    }
+    [Buffer]::BlockCopy($suffix, 0, $out, $o, $suffix.Length)
+    return ,$out
+}
+
 function New-OzkFont([float]$Size, [Drawing.FontStyle]$Style = [Drawing.FontStyle]::Regular) {
     return New-Object Drawing.Font("Tahoma", $Size, $Style, [Drawing.GraphicsUnit]::Pixel)
 }
@@ -511,7 +570,7 @@ function New-OzkReceiptSpoolJob {
     if ($installed.Count -ne 1) { throw "Printer queue not found or ambiguous: $PrinterName" }
     $bitmap = New-OzkReceiptBitmap -Receipt $Receipt -LogoPath $LogoPath
     try {
-        $payload = [OzkRawThermalPrinter]::ToEscPosRaster($bitmap, 190)
+        $payload = ConvertTo-OzkBandedRaster ([OzkRawThermalPrinter]::ToEscPosRaster($bitmap, 190)) $script:ReceiptBandRows
     } finally {
         $bitmap.Dispose()
     }

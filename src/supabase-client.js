@@ -932,6 +932,101 @@
       }
     },
 
+    // تصحيحات تصنيف النشرة (عامة/وزاري) — Migration 28. قراءة للطاقم، والكتابة عبر
+    // دالة set_item_bulletin_classification للمالك وحده مع سجل تدقيق في القاعدة.
+    // غياب الجدول (قبل تطبيق الهجرة) ليس فشلاً: available=false والتصنيف يبقى على
+    // التصحيحات المؤكدة المثبّتة بالكود وقاعدة الاسم.
+    async listItemBulletinClassifications() {
+      if (!client) return { rows: [], available: false };
+      const session = await getSupabaseSession();
+      if (!session) return { rows: [], available: true };
+      const { data, error } = await client
+        .from("item_bulletin_classifications")
+        .select("item_guid, item_key, item_name, item_number, bulletin, reason, updated_by_email, updated_at")
+        .limit(5000);
+      if (error) {
+        if (error.code === "42P01" || error.code === "PGRST205") return { rows: [], available: false };
+        throw new Error(translateDbError(error.message));
+      }
+      return { rows: data || [], available: true };
+    },
+
+    async setItemBulletinClassification({ itemGuid, bulletin, itemKey, itemName, reason }) {
+      if (!client) throw new Error("تصحيح التصنيف يحتاج الاتصال بقاعدة البيانات.");
+      await requireUser();
+      const guid = String(itemGuid || "").trim().replace(/^\{|\}$/g, "").toUpperCase();
+      const { data, error } = await client.rpc("set_item_bulletin_classification", {
+        p_item_guid: guid,
+        p_bulletin: String(bulletin || ""),
+        p_item_key: String(itemKey || ""),
+        p_item_name: String(itemName || ""),
+        p_reason: String(reason || "")
+      });
+      if (error) {
+        if (error.code === "PGRST202" || error.code === "42883") {
+          throw new Error("تصحيح التصنيف غير مفعّل بعد على قاعدة البيانات (Migration 28).");
+        }
+        throw new Error(translateDbError(error.message));
+      }
+      return data;
+    },
+
+    // ظهور الأصناف في نشرة الأسعار (عام/مخفي) — Migration 30. قراءة وكتابة للمالك
+    // وحده عبر set_item_bulletin_visibility مع سجل تدقيق في القاعدة.
+    // غياب الجدول (قبل تطبيق الهجرة) ليس فشلاً: available=false وكل الأصناف تبقى ظاهرة
+    // (الحالة الافتراضية)، فلا يُخفى شيء صامتاً عند فشل القراءة.
+    async listItemBulletinVisibility() {
+      if (!client) return { rows: [], available: false };
+      const session = await getSupabaseSession();
+      if (!session) return { rows: [], available: true };
+      const { data, error } = await client
+        .from("item_bulletin_visibility")
+        .select("item_guid, item_key, item_name, reason, updated_by_email, updated_at")
+        .limit(5000);
+      if (error) {
+        if (error.code === "42P01" || error.code === "PGRST205") return { rows: [], available: false };
+        throw new Error(translateDbError(error.message));
+      }
+      return { rows: data || [], available: true };
+    },
+
+    async setItemBulletinVisibility({ itemGuid, hidden, itemKey, itemName, reason }) {
+      if (!client) throw new Error("تعديل ظهور الصنف يحتاج الاتصال بقاعدة البيانات.");
+      await requireUser();
+      const guid = String(itemGuid || "").trim().replace(/^\{|\}$/g, "").toUpperCase();
+      const { data, error } = await client.rpc("set_item_bulletin_visibility", {
+        p_item_guid: guid,
+        p_hidden: Boolean(hidden),
+        p_item_key: String(itemKey || ""),
+        p_item_name: String(itemName || ""),
+        p_reason: String(reason || "")
+      });
+      if (error) {
+        if (error.code === "PGRST202" || error.code === "42883") {
+          throw new Error("ظهور الأصناف غير مفعّل بعد على قاعدة البيانات (Migration 30).");
+        }
+        throw new Error(translateDbError(error.message));
+      }
+      return data;
+    },
+
+    // نافذة bulletin_hidden_items_feed العامة (item_key فقط) — بلا شرط جلسة أو
+    // صلاحية مالك عمداً، لأنها المصدر الذي يُفلتَر عليه فعلياً ما يراه أي زائر
+    // أو موظف غير مالك في معاينة/تصدير النشرة (بعكس listItemBulletinVisibility
+    // أعلاه، المقيّد بـRLS للمالك وحده لشاشة الإدارة فقط).
+    async listPublicBulletinHiddenKeys() {
+      if (!client) return { rows: [], available: false };
+      const { data, error } = await client
+        .from("bulletin_hidden_items_feed")
+        .select("item_key")
+        .limit(5000);
+      if (error) {
+        if (error.code === "42P01" || error.code === "PGRST205") return { rows: [], available: false };
+        throw new Error(translateDbError(error.message));
+      }
+      return { rows: data || [], available: true };
+    },
+
     async getCustomerMovementsReport() {
       if (!client) {
         const local = readJson(INVENTORY_REPORTS_KEY, []).filter((report) => report.source === "ameen_customer_movements");
@@ -971,6 +1066,26 @@
 
       if (error) throw new Error(translateDbError(error.message));
       return (data && data[0]) || null;
+    },
+
+    async listLiveAmeenInvoices(sinceIso) {
+      // آخر حالة لكل فاتورة تغيّرت بعد لقطة تقرير الفواتير (يكتبها وكيل أحداث الفواتير
+      // على Windows خلال ثوانٍ من الحفظ في الأمين). قراءة فقط؛ RLS يحصرها بالموظفين.
+      // الدمج والتحقق الحسابي في src/live-invoices.js.
+      if (!client) return [];
+      const session = await getSupabaseSession();
+      if (!session) return [];
+
+      const { data, error } = await client
+        .from("ameen_invoices")
+        .select("bill_guid, bill_type, status, revision, source_event_at, source_seq, bill_number, bill_date, customer_guid, is_named, payload, updated_at")
+        .gte("source_event_at", sinceIso)
+        .or("is_named.eq.true,status.eq.deleted")
+        .order("source_event_at", { ascending: true })
+        .limit(1000);
+
+      if (error) throw new Error(translateDbError(error.message));
+      return Array.isArray(data) ? data : [];
     },
 
     async getPurchaseInvoicesAmeenReport() {
@@ -1085,6 +1200,86 @@
       // ولا يصلح رمزاً للمشاركة: 10 خانات hex أي 40 بت فقط. أي رابط وصل يُبنى
       // مستقبلاً يستعمل `receipt.html?t=<public_token>` لا `?id=`.
       return { id: data.id, token: data.public_token, publicUrl: `receipt.html?t=${data.public_token}` };
+    },
+
+    // ── فواتير بانتظار تسعير المالك (Migration 27) ─────────────────────────
+    // القراءة مباشرة (RLS: الطاقم)، وكل كتابة عبر الدوال وحدها — لا insert/update
+    // على الجدول من المتصفح. رسالة الخطأ تبقى رمز الخادم الخام (version_conflict…)
+    // كي تترجمه src/sales-price-requests.js إلى نص واضح.
+    async listSalesPriceRequests() {
+      if (!client) return [];
+      const session = await getSupabaseSession();
+      if (!session) return [];
+      const { data, error } = await client
+        .from("sales_price_requests")
+        .select("id, status, mode, rate, customer_name, pay_method, note, lines, total, discount, net, version, created_by, created_by_email, created_at, priced_at, ameen_bill_no, entered_at, cancel_reason")
+        .order("created_at", { ascending: false })
+        .limit(200);
+      if (error) throw new Error(translateDbError(error.message));
+      return (data || []).map((row) => ({
+        id: Number(row.id),
+        status: row.status,
+        mode: row.mode === "mufrak" ? "mufrak" : "jumla",
+        rate: row.rate === null ? null : Number(row.rate),
+        customerName: row.customer_name || "",
+        payMethod: row.pay_method,
+        note: row.note || "",
+        lines: Array.isArray(row.lines) ? row.lines : [],
+        total: Number(row.total || 0),
+        discount: Number(row.discount || 0),
+        net: Number(row.net || 0),
+        version: Number(row.version),
+        createdBy: row.created_by,
+        createdByEmail: row.created_by_email || "",
+        createdAt: row.created_at,
+        pricedAt: row.priced_at,
+        ameenBillNo: row.ameen_bill_no || "",
+        enteredAt: row.entered_at,
+        cancelReason: row.cancel_reason || ""
+      }));
+    },
+
+    async submitSalesPriceRequest({ mode, customerName, payMethod, lines, rate, note }) {
+      if (!client) throw new Error("غير متصل بقاعدة البيانات.");
+      const session = await getSupabaseSession();
+      if (!session) throw new Error(missingSessionMessage());
+      const { data, error } = await client.rpc("sales_price_request_submit", {
+        p_mode: mode,
+        p_customer_name: customerName || "",
+        p_pay_method: payMethod,
+        p_lines: lines,
+        p_rate: rate ?? null,
+        p_note: note || ""
+      });
+      if (error) throw new Error(error.message || "submit_failed");
+      return data;
+    },
+
+    async priceSalesPriceRequest(id, version, prices, discount) {
+      if (!client) throw new Error("غير متصل بقاعدة البيانات.");
+      const { data, error } = await client.rpc("sales_price_request_price", {
+        p_id: id, p_version: version, p_prices: prices, p_discount: discount || 0
+      });
+      if (error) throw new Error(error.message || "price_failed");
+      return data;
+    },
+
+    async markSalesPriceRequestEntered(id, version, ameenBillNo) {
+      if (!client) throw new Error("غير متصل بقاعدة البيانات.");
+      const { data, error } = await client.rpc("sales_price_request_mark_entered", {
+        p_id: id, p_version: version, p_ameen_bill_no: ameenBillNo
+      });
+      if (error) throw new Error(error.message || "mark_entered_failed");
+      return data;
+    },
+
+    async cancelSalesPriceRequest(id, version, reason) {
+      if (!client) throw new Error("غير متصل بقاعدة البيانات.");
+      const { data, error } = await client.rpc("sales_price_request_cancel", {
+        p_id: id, p_version: version, p_reason: reason || ""
+      });
+      if (error) throw new Error(error.message || "cancel_failed");
+      return data;
     },
 
     async listCustomerCreditLimits() {
@@ -2107,6 +2302,16 @@
 
     async openSmartInventoryRecount(itemId, reason) {
       return inventoryRpc("smart_inventory_owner_open_recount", { p_item_id: itemId, p_reason: cleanText(reason, 500) });
+    },
+
+    // إعادة عد جماعية: المواد بمعرّف الأمين، وتُفتح في كل مستودعات اليوم دفعة واحدة.
+    async getSmartInventoryOwnerDayItems(date = null) {
+      return inventoryRpc("smart_inventory_owner_day_items", { p_date: date || null });
+    },
+
+    async openSmartInventoryBulkRecount(itemRefs, reason, date = null) {
+      const refs = Array.from(new Set((itemRefs || []).map((ref) => cleanText(ref, 200)).filter(Boolean)));
+      return inventoryRpc("smart_inventory_owner_bulk_recount", { p_date: date || null, p_item_refs: refs, p_reason: cleanText(reason, 500) });
     },
 
     async reopenSmartInventorySession(sessionId, reason) {

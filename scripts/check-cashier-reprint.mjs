@@ -56,7 +56,10 @@ assert.doesNotMatch(service.bridgeScriptPath, /%/, 'لا متغيرات بيئة
 assert.equal(service.bridgeSqlSource, 'tool-secret');
 assert.equal(service.enforceProtectedPaths, true);
 assert.ok(!JSON.stringify(service).match(/password|pwd|connectionstring/i), 'لا أسرار في مثال حساب الخدمة');
-assert.equal((lib.match(/EnvironmentVariables\[/g) || []).length, 1, 'متغيّر بيئة واحد فقط يُضبط للجسر');
+assert.equal((lib.match(/EnvironmentVariables\[/g) || []).length, 2, 'متغيّرا بيئة فقط للجسر: اتصال القراءة ومسار الطباعة');
+assert.match(lib, /\$info\.EnvironmentVariables\["OZK_RECEIPT_TRANSPORT"\] = "driver"/, 'مسار الطباعة قيمة ثابتة للعملية الفرعية وحدها');
+assert.match(lib, /EnvironmentVariables\.Remove\("OZK_RECEIPT_TRANSPORT"\)/, 'raw يزيل أي مسار موروث');
+assert.match(lib, /Assert-CashierRendererSupportsTransport \$Config/, 'driver يتطلب رسّاماً يدعمه ضمن شرط الطباعة');
 assert.match(lib, /\$info\.EnvironmentVariables\["AMEEN_SQL_CONNECTION_STRING"\] = \$SqlConnectionString/, 'المتغيّر للعملية الفرعية وحدها');
 assert.doesNotMatch(lib, /SetEnvironmentVariable/, 'لا كتابة لمتغيرات بيئة الجهاز أو المستخدم');
 
@@ -84,6 +87,11 @@ assert.match(renderer, /pDataType = "RAW"/, 'renderer: الإرسال RAW كما
 const send = renderer.slice(renderer.indexOf('function Send-OzkReceiptToPrinter'));
 const order = ['if (-not $ConfirmPhysicalPrint)', '$PrinterName -cne $script:CashierPrinterName', 'Assert-OzkPrinterQueueReady $PrinterName', 'New-OzkReceiptBitmap', '[OzkRawThermalPrinter]::Send('].map((t) => send.indexOf(t));
 assert.ok(order.every((i) => i >= 0) && order.every((i, k) => k === 0 || i > order[k - 1]), 'renderer: التأكيد ثم الطابعة ثم فحص الطابور ثم الرسم ثم الإرسال');
+// مسار التعريف الاختياري: يُختار قبل فحص الطابور، ولا يكتب أوامر ESC/POS ولا يمر بـWritePrinter.
+assert.ok(send.indexOf('$transport = Get-OzkReceiptTransport') >= 0 && send.indexOf('$transport = Get-OzkReceiptTransport') < send.indexOf('Assert-OzkPrinterQueueReady $PrinterName'), 'renderer: المسار يُحسم قبل فحص الطابور');
+const driverClass = renderer.slice(renderer.indexOf('public static class OzkDriverReceiptPrinter'), renderer.indexOf('function Get-OzkReceiptTransport'));
+assert.ok(driverClass.length > 0, 'renderer: صنف مسار التعريف موجود');
+assert.doesNotMatch(driverClass, /WritePrinter|SetPrinter|DM_UPDATE/, 'renderer: مسار التعريف لا يكتب بايتات خاماً ولا يغيّر إعدادات الطابور');
 assert.match(renderer, /Export-ModuleMember -Function New-OzkReceiptBitmap, Save-OzkReceiptPreview, Send-OzkReceiptToPrinter\s*$/, 'renderer: الدوال المصدَّرة كما هي');
 const rendererHash = createHash('sha256').update(rendererBytes).digest('hex');
 assert.equal(service.expectedRendererSha256, rendererHash, 'مثال حساب الخدمة يثبّت بصمة الـrenderer في المستودع');
