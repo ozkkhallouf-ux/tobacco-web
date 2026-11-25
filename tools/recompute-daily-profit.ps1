@@ -60,7 +60,10 @@ function Notify-Failure($Message) {
         & "$PSScriptRoot\send-telegram-notification.ps1" `
             -Message ($title + "`n" + $Message) -EventType "sync_failure" -DedupeKey "winfail:recompute-daily-profit" `
             -DedupeMinutes 360 -EnvFile $EnvFile
-    } catch { }
+    } catch {
+        # Best effort: a failed alert must not hide the original error, but it is logged.
+        Write-Log ("WARN: failure alert not sent: " + $_.Exception.Message)
+    }
 }
 
 $modeCount = 0
