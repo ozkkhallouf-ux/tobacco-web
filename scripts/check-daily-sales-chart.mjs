@@ -76,6 +76,29 @@ const tie = C.monthStats(C.buildMonth([
 assert.equal(tie.min.date, "2026-10-02", "التعادل: أول يوم");
 const none = C.monthStats(C.buildMonth([], "2026-10", "2026-10-31"));
 assert.equal(none.knownDays, 0); assert.equal(none.average, null); assert.equal(none.missingDays, 31);
+assert.equal(none.minPositive, null);
+
+// 3ب) «أدنى مبيع فعلي»: أقل قيمة موجبة؛ الصفر والسالب وبلا بيانات والمستقبل خارجه
+assert.deepEqual(plain(s.minPositive), { value: 500, date: "2026-11-05" }, "الصفر (2/11) والسالب (4/11) مستبعدان");
+assert.deepEqual(plain(s.min), { value: -250, date: "2026-11-04" }, "min القديم لم يتغيّر");
+const futureLow = C.monthStats(C.buildMonth([
+  { report_date: "2026-11-01", net_sales: 900 }, { report_date: "2026-11-02", net_sales: 0 },
+  { report_date: "2026-11-20", net_sales: 5 } // مستقبلي ⇒ خارج المؤشر
+], "2026-11", "2026-11-10"));
+assert.deepEqual(plain(futureLow.minPositive), { value: 900, date: "2026-11-01" });
+const allZero = C.monthStats(C.buildMonth([
+  { report_date: "2026-12-04", net_sales: 0 }, { report_date: "2026-12-11", net_sales: 0 }
+], "2026-12", "2026-12-31"));
+assert.equal(allZero.knownDays, 2); assert.equal(allZero.minPositive, null, "لا مبيعات موجبة ⇒ null");
+assert.equal(allZero.total, 0);
+const tiePos = C.monthStats(C.buildMonth([
+  { report_date: "2026-10-03", net_sales: 10 }, { report_date: "2026-10-08", net_sales: 10 }
+], "2026-10", "2026-10-31"));
+assert.equal(tiePos.minPositive.date, "2026-10-03", "التعادل: أول يوم");
+// أيام الصفر تبقى مرسومة كنقاط على الخط
+assert.equal((C.renderSvg(C.buildMonth([
+  { report_date: "2026-12-04", net_sales: 0 }, { report_date: "2026-12-05", net_sales: 100 }
+], "2026-12", "2026-12-05"), 600).match(/class="dsc-dot/g) || []).length, 2);
 const future = C.buildMonth([], "2027-01", "2026-11-25");
 assert.ok(future.days.every((d) => d.state === "future"));
 
@@ -125,6 +148,11 @@ const summaryAt = reports.indexOf("📊 ملخص الحركة اليومية");
 assert.ok(chartAt > 0 && chartAt < summaryAt, "الرسم يجب أن يسبق ملخص الحركة اليومية مباشرة");
 const loader = app.slice(app.indexOf("async function loadSalesChartMonth("), app.indexOf("function dailySalesChartSection("));
 assert.match(loader, /!isOwner\(\)/, "لا طلب لحساب غير المالك");
+const kpis = app.slice(app.indexOf("function salesChartKpisMarkup("), app.indexOf("function salesChartPendingMarkup("));
+assert.match(kpis, /"أدنى مبيع فعلي"/);
+assert.match(kpis, /stats\.minPositive/);
+assert.match(kpis, /"لا توجد مبيعات"/);
+assert.doesNotMatch(kpis, /"أدنى يوم"|stats\.min\./, "المؤشر لم يعد يقرأ أدنى قيمة مطلقة");
 const dm = app.slice(app.indexOf("function dailyMovementSection()"), app.indexOf("function reportsPage()"));
 assert.doesNotMatch(dm, /salesChart|ozkDailySalesChart/, "ملخص الحركة اليومية لا يُعدَّل");
 

@@ -133,10 +133,21 @@
   // المؤشرات: الإجمالي ومتوسط الأيام المنقضية ذات البيانات وأعلى/أدنى يوم.
   // الأيام بلا بيانات لا تدخل المقام: «صفر» لم يُقَس لا يساوي «لا مبيعات».
   // عند التعادل يُعتمد أول يوم في الشهر.
+  // minPositive («أدنى مبيع فعلي»): أقل صافي مبيع **موجب** بين أيام البيانات —
+  // أيام الصفر (عطلة/إغلاق) والسالبة وبلا بيانات والمستقبل خارجه؛ null إن لم يوجد.
+  // `min` باقٍ كما هو (أدنى قيمة مطلقاً) ولا يدخل في minPositive.
+  function lowestPositiveDay(known) {
+    let best = null;
+    for (const d of known) {
+      if (d.value > 0 && (!best || d.value < best.value)) best = d;
+    }
+    return best ? { value: best.value, date: best.date } : null;
+  }
+
   function monthStats(month) {
     const known = (month?.days || []).filter((d) => d.state === "value");
     const missing = (month?.days || []).filter((d) => d.state === "missing").length;
-    if (!known.length) return { total: 0, average: null, max: null, min: null, knownDays: 0, missingDays: missing };
+    if (!known.length) return { total: 0, average: null, max: null, min: null, minPositive: null, knownDays: 0, missingDays: missing };
     const sum = known.reduce((acc, d) => acc + d.value, 0);
     let max = known[0];
     let min = known[0];
@@ -149,6 +160,7 @@
       average: Math.round((sum / known.length) * 100) / 100,
       max: { value: max.value, date: max.date },
       min: { value: min.value, date: min.date },
+      minPositive: lowestPositiveDay(known),
       knownDays: known.length,
       missingDays: missing
     };

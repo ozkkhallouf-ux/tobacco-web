@@ -1113,7 +1113,9 @@ function salesChartKpisMarkup(chart, stats, isCurrentMonth) {
         ${kpi("إجمالي الشهر", chart.formatUsd(stats.total), `أيام البيانات: ${stats.knownDays}`)}
         ${kpi(isCurrentMonth ? "المتوسط اليومي حتى اليوم" : "المتوسط اليومي", chart.formatUsd(stats.average), "")}
         ${kpi("أعلى يوم", chart.formatUsd(stats.max.value), shortDate(stats.max.date))}
-        ${kpi("أدنى يوم", chart.formatUsd(stats.min.value), shortDate(stats.min.date))}
+        ${stats.minPositive
+          ? kpi("أدنى مبيع فعلي", chart.formatUsd(stats.minPositive.value), shortDate(stats.minPositive.date))
+          : kpi("أدنى مبيع فعلي", "لا توجد مبيعات", "")}
       </div>`;
 }
 
