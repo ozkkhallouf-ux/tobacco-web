@@ -300,3 +300,13 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 | `29-document-archive-notify-release-claim-rollback.sql` | تراجع جاهز — غير مطبَّق | يحذف الدالة وحدها؛ جدول الحجوزات ودوال 26 لا تُمسّ. انشر قبله نسخة الدالة السابقة من `document-archive-notify`. |
 
 - **اختبار:** `scripts/check-drive-invoice-archive.mjs` فوق 26 على Postgres محلي (`supabase/tests/document-archive-notify-claims.sql`): تحرير بـtoken صحيح، لا شيء بـtoken قديم/خاطئ، لا شيء على حجز صار unknown أو sent أو released أصلاً، ثم عمليات psql متوازية على الحجز نفسه، ثم التراجع. واختبارات سلوك `handleNotifyBatch` نفسه (فشل الحجز في أول/وسط/آخر الدفعة، فشل أثناء التحرير نفسه، انقطاع شبكة خلال الحجز أو التحرير) في القسم الجديد من `check-drive-invoice-archive.mjs`.
+
+## 31: إعادة احتساب الأيام الماضية في ameen_daily_profit (2026-11-25) — غير مطبَّقة على الإنتاج
+
+| الملف | ما يفعله |
+|---|---|
+| `31-ameen-daily-profit-recompute.sql` | جدول `private.ameen_daily_profit_revisions` (سجل التغييرات للتراجع)، ودالة `recompute_ameen_daily_profit(date, jsonb)` لهوية المزامنة وحدها: الماضي فقط (ترفض اليوم والمستقبل وما قبل 400 يوم)، لا كتابة إن لم يتغيّر المحتوى المالي، لا تلمس `created_at`، وتشترط `complete = (missing_cost_lines = 0)`. ودالة `private.ameen_daily_profit_revert_revisions(timestamptz)` لتراجع البيانات. لا تمسّ `upsert_ameen_daily_profit` ولا RLS. |
+| `31-ameen-daily-profit-recompute-rollback.sql` | يعيد البيانات من السجل أولاً (يحذف الأيام المُدرجة ويعيد الملخصات القديمة)، ثم يحذف الدوال والجدول. أوقف مهمتي إعادة الاحتساب قبله. |
+
+- **اختبار:** `scripts/check-daily-profit-recompute.mjs` على Postgres محلي (`supabase/tests/ameen-daily-profit-recompute.sql`): الهوية، نافذة التاريخ، صحة الملخص، unchanged/updated/inserted، ثبات `created_at`، عدم التكرار، تراجع البيانات، وملف التراجع الكامل.
+- **ملاحظة:** إدراج يوم غائب يمرّ على trigger `trg_notify_inventory_report` (لكل المصادر). يتخطّى ما هو أقدم من 14 يوماً، فإعادة بناء آب لا ترسل شيئاً؛ يوم حديث غائب كلياً قد يرسل «📦 وصل تقرير الجرد» مرة واحدة.

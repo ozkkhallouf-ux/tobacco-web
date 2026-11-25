@@ -53,6 +53,7 @@ export const CHECKS = [
   'check-customer-intelligence.mjs',
   'check-customer-invoice-identity.mjs',
   'check-customer-payment-rule.mjs',
+  'check-daily-profit-recompute.mjs',
   'check-daily-pull-not-silently-stuck.mjs',
   'check-daily-report-once-per-date.mjs',
   'check-daily-sales-chart.mjs',
