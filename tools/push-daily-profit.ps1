@@ -41,6 +41,8 @@ function Write-Log($Message) {
 }
 
 function Notify-Failure($Message) {
+    # التشغيل التجريبي لا يرسل تنبيه فشل حقيقياً إلى تيليغرام.
+    if ($DryRun) { return }
     try {
         & "$PSScriptRoot\send-telegram-notification.ps1" `
             -Message $Message -EventType "sync_failure" -DedupeKey "winfail:push-daily-profit" `
