@@ -95,6 +95,17 @@ const tiePos = C.monthStats(C.buildMonth([
   { report_date: "2026-10-03", net_sales: 10 }, { report_date: "2026-10-08", net_sales: 10 }
 ], "2026-10", "2026-10-31"));
 assert.equal(tiePos.minPositive.date, "2026-10-03", "التعادل: أول يوم");
+// اليوم الحالي غير مكتمل ⇒ خارج «أدنى مبيع فعلي»، لكنه باقٍ في الإجمالي والمتوسط والرسم
+const todayLow = C.monthStats(C.buildMonth([
+  { report_date: "2026-11-01", net_sales: 900 }, { report_date: "2026-11-02", net_sales: 0 },
+  { report_date: "2026-11-03", net_sales: 50 } // اليوم الحالي
+], "2026-11", "2026-11-03"));
+assert.deepEqual(plain(todayLow.minPositive), { value: 900, date: "2026-11-01" }, "اليوم الحالي مستبعد");
+assert.equal(todayLow.total, 950); assert.equal(todayLow.knownDays, 3);
+assert.equal(todayLow.average, 316.67);
+const onlyToday = C.monthStats(C.buildMonth([{ report_date: "2026-11-01", net_sales: 70 }], "2026-11", "2026-11-01"));
+assert.equal(onlyToday.minPositive, null, "اليوم الحالي وحده ⇒ لا توجد مبيعات");
+assert.equal(onlyToday.total, 70);
 // أيام الصفر تبقى مرسومة كنقاط على الخط
 assert.equal((C.renderSvg(C.buildMonth([
   { report_date: "2026-12-04", net_sales: 0 }, { report_date: "2026-12-05", net_sales: 100 }

@@ -135,11 +135,12 @@
   // عند التعادل يُعتمد أول يوم في الشهر.
   // minPositive («أدنى مبيع فعلي»): أقل صافي مبيع **موجب** بين أيام البيانات —
   // أيام الصفر (عطلة/إغلاق) والسالبة وبلا بيانات والمستقبل خارجه؛ null إن لم يوجد.
+  // واليوم الحالي خارجه أيضاً لأنه غير مكتمل حتى آخر مزامنة (يبقى في الرسم والإجمالي والمتوسط).
   // `min` باقٍ كما هو (أدنى قيمة مطلقاً) ولا يدخل في minPositive.
   function lowestPositiveDay(known) {
     let best = null;
     for (const d of known) {
-      if (d.value > 0 && (!best || d.value < best.value)) best = d;
+      if (!d.isToday && d.value > 0 && (!best || d.value < best.value)) best = d;
     }
     return best ? { value: best.value, date: best.date } : null;
   }
