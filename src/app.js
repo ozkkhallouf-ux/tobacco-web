@@ -1095,6 +1095,43 @@ async function loadSalesChartMonth(monthKey, { force = false } = {}) {
   }
 }
 
+function salesChartNavMarkup(chart, monthKey, currentMonth) {
+  return `
+    <div class="dsc-nav">
+      <button class="button secondary mini-button" type="button" data-action="sales-chart-prev" aria-label="الشهر السابق">→</button>
+      <span class="dsc-month">${escapeHtml(chart.monthLabel(monthKey))}</span>
+      <button class="button secondary mini-button" type="button" data-action="sales-chart-next" aria-label="الشهر التالي"${monthKey >= currentMonth ? " disabled" : ""}>←</button>
+      ${monthKey !== currentMonth ? '<button class="button secondary mini-button" type="button" data-action="sales-chart-today">الشهر الحالي</button>' : ""}
+    </div>`;
+}
+
+function salesChartKpisMarkup(chart, stats, isCurrentMonth) {
+  if (!stats.knownDays) return "";
+  const shortDate = (iso) => { const p = String(iso || "").split("-"); return p.length === 3 ? `${Number(p[2])}/${Number(p[1])}` : ""; };
+  const kpi = (label, value, sub) => `<div class="dsc-kpi"><div class="dsc-kpi-l">${label}</div><div class="dsc-kpi-v">${escapeHtml(value)}</div>${sub ? `<div class="dsc-kpi-s" dir="auto">${escapeHtml(sub)}</div>` : ""}</div>`;
+  return `<div class="dsc-kpis">
+        ${kpi("إجمالي الشهر", chart.formatUsd(stats.total), `أيام البيانات: ${stats.knownDays}`)}
+        ${kpi(isCurrentMonth ? "المتوسط اليومي حتى اليوم" : "المتوسط اليومي", chart.formatUsd(stats.average), "")}
+        ${kpi("أعلى يوم", chart.formatUsd(stats.max.value), shortDate(stats.max.date))}
+        ${kpi("أدنى يوم", chart.formatUsd(stats.min.value), shortDate(stats.min.date))}
+      </div>`;
+}
+
+function salesChartPendingMarkup(monthKey, loading) {
+  const failed = state.salesChartError?.month === monthKey ? state.salesChartError : null;
+  return failed && !loading
+    ? `<div class="report-status">تعذّر تحميل المبيعات: ${escapeHtml(failed.message)}</div>`
+    : `<p class="muted dsc-note">جاري تحميل مبيعات الشهر…</p>`;
+}
+
+function salesChartBodyMarkup(month, stats) {
+  if (stats.knownDays) {
+    return `<div class="dsc-chart"><div class="dsc-canvas" data-dsc-canvas tabindex="0" dir="ltr" aria-label="رسم المبيعات اليومية — مرّر أو اضغط على يوم، أو استعمل الأسهم"></div><div class="dsc-tip" data-dsc-tip hidden></div></div>`;
+  }
+  const allFuture = month.days.every((d) => d.state === "future");
+  return `<div class="report-status">${allFuture ? "هذا الشهر لم يبدأ بعد." : "لا تتوفر بيانات مبيعات لهذا الشهر."}</div>`;
+}
+
 function dailySalesChartSection() {
   const chart = window.ozkDailySalesChart;
   if (!chart) return "";
@@ -1106,44 +1143,18 @@ function dailySalesChartSection() {
   const monthKey = state.salesChartMonth || currentMonth;
   const cached = state.salesChartCache[monthKey];
   const loading = state.salesChartLoading === monthKey;
-  const nav = `
-    <div class="dsc-nav">
-      <button class="button secondary mini-button" type="button" data-action="sales-chart-prev" aria-label="الشهر السابق">→</button>
-      <span class="dsc-month">${escapeHtml(chart.monthLabel(monthKey))}</span>
-      <button class="button secondary mini-button" type="button" data-action="sales-chart-next" aria-label="الشهر التالي"${monthKey >= currentMonth ? " disabled" : ""}>←</button>
-      ${monthKey !== currentMonth ? '<button class="button secondary mini-button" type="button" data-action="sales-chart-today">الشهر الحالي</button>' : ""}
-    </div>`;
-  const header = `<div class="dsc-head"><div class="dsc-title">📈 حركة المبيعات اليومية</div>${nav}</div>`;
-  if (!cached) {
-    const failed = state.salesChartError?.month === monthKey ? state.salesChartError : null;
-    const body = failed && !loading
-      ? `<div class="report-status">تعذّر تحميل المبيعات: ${escapeHtml(failed.message)}</div>`
-      : `<p class="muted dsc-note">جاري تحميل مبيعات الشهر…</p>`;
-    return `<div class="dsc-panel">${header}${body}</div>`;
-  }
+  const header = `<div class="dsc-head"><div class="dsc-title">📈 حركة المبيعات اليومية</div>${salesChartNavMarkup(chart, monthKey, currentMonth)}</div>`;
+  if (!cached) return `<div class="dsc-panel">${header}${salesChartPendingMarkup(monthKey, loading)}</div>`;
   const month = chart.buildMonth(cached.rows, monthKey, today);
   const stats = chart.monthStats(month);
-  const shortDate = (iso) => { const p = String(iso || "").split("-"); return p.length === 3 ? `${Number(p[2])}/${Number(p[1])}` : ""; };
-  const kpi = (label, value, sub) => `<div class="dsc-kpi"><div class="dsc-kpi-l">${label}</div><div class="dsc-kpi-v">${escapeHtml(value)}</div>${sub ? `<div class="dsc-kpi-s" dir="auto">${escapeHtml(sub)}</div>` : ""}</div>`;
-  const kpis = stats.knownDays
-    ? `<div class="dsc-kpis">
-        ${kpi("إجمالي الشهر", chart.formatUsd(stats.total), `أيام البيانات: ${stats.knownDays}`)}
-        ${kpi(monthKey === currentMonth ? "المتوسط اليومي حتى اليوم" : "المتوسط اليومي", chart.formatUsd(stats.average), "")}
-        ${kpi("أعلى يوم", chart.formatUsd(stats.max.value), shortDate(stats.max.date))}
-        ${kpi("أدنى يوم", chart.formatUsd(stats.min.value), shortDate(stats.min.date))}
-      </div>`
-    : "";
-  const empty = !stats.knownDays
-    ? `<div class="report-status">${month.days.every((d) => d.state === "future") ? "هذا الشهر لم يبدأ بعد." : "لا تتوفر بيانات مبيعات لهذا الشهر."}</div>`
-    : "";
   const missingNote = stats.missingDays
     ? ` · <span class="dsc-legend-missing"></span> ${stats.missingDays} ${stats.missingDays === 1 ? "يوم" : "أيام"} بلا بيانات (ليست صفراً)`
     : "";
   return `
     <div class="dsc-panel" data-dsc-host data-dsc-month="${escapeHtml(monthKey)}">
       ${header}
-      ${kpis}
-      ${empty || `<div class="dsc-chart"><div class="dsc-canvas" data-dsc-canvas tabindex="0" dir="ltr" aria-label="رسم المبيعات اليومية — مرّر أو اضغط على يوم، أو استعمل الأسهم"></div><div class="dsc-tip" data-dsc-tip hidden></div></div>`}
+      ${salesChartKpisMarkup(chart, stats, monthKey === currentMonth)}
+      ${salesChartBodyMarkup(month, stats)}
       <p class="muted dsc-note">صافي المبيعات بالدولار من الأمين (مبيعات − حسومات − مرتجعات، بلا دفعات ولا مصاريف) بتوقيت دمشق${loading ? " · جاري التحديث…" : ""}${missingNote}</p>
     </div>`;
 }
