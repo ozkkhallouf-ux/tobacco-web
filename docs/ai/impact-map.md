@@ -4,7 +4,7 @@
 
 | المجال | ملفات نموذجية | مخاطر الارتباط | الحد الأدنى للتحقق |
 |---|---|---|---|
-| المبيعات | `src/app.js`, `src/number-normalizer.js`, `tools/push-sales-line-items.ps1`, `supabase/sales-line-items-atomic-refresh.sql` | الفاتورة، المخزون، الرصيد، الطباعة | `npm.cmd run check` + اختبار فاتورة وحساب مستقل عند تغيير الحسابات |
+| المبيعات | `src/app.js`, `src/number-normalizer.js`, `src/daily-sales-chart.js`, `tools/push-sales-line-items.ps1`, `supabase/sales-line-items-atomic-refresh.sql` | الفاتورة، المخزون، الرصيد، الطباعة | `npm.cmd run check` + اختبار فاتورة وحساب مستقل عند تغيير الحسابات |
 | النشرات | `src/app.js`, `src/price-list-template.js`, `scripts/generate-*`, `scripts/exchange-rate.json`, `public/downloads/` | السعر، الصرف، الثيم، الكاش، PDF | فحص المشروع + التوليد + مطابقة الأسعار + فحص بصري للفاتح والداكن عند تغير الشكل |
 | المخزون | `src/business-snapshot.js`, `src/inventory-recon-calc.js`, `tools/ameen-sync-agent.ps1` | النشرات، الشراء، التنبيهات | فحص المشروع + مقارنة مستقلة مع حركات الأمين |
 | الأرصدة | `src/app.js`, `tools/ameen-customer-balances-query.sql`, `tools/push-ameen-account-balances.ps1` | كشف الحساب، الفاتورة، الائتمان | فحص المشروع + مقارنة رصيد وحركات مع `ac000` |

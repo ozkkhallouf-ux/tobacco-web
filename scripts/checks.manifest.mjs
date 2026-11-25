@@ -55,6 +55,7 @@ export const CHECKS = [
   'check-customer-payment-rule.mjs',
   'check-daily-pull-not-silently-stuck.mjs',
   'check-daily-report-once-per-date.mjs',
+  'check-daily-sales-chart.mjs',
   'check-decision-pipeline-safety.mjs',
   'check-decision-scoring.mjs',
   'check-docker-dev-port-binding.mjs',
