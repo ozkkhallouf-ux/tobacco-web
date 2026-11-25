@@ -253,6 +253,11 @@ const state = {
   dailyMovementLoading: false,
   dailyMovementError: null,
   dmFetchedFor: null,
+  // رسم «حركة المبيعات اليومية» (src/daily-sales-chart.js): شهر معروض + ذاكرة لكل شهر.
+  salesChartMonth: "",
+  salesChartCache: {},
+  salesChartLoading: "",
+  salesChartError: null,
   loading: true,
   // ثلاث حالات إقلاع منفصلة، ولا تُعرض «تعذر الاتصال» إلا بدليل (classifyStartupOutcome):
   startupDegraded: false,  // فشل اتصال فعلي رصده عميل Supabase
@@ -1052,6 +1057,106 @@ async function loadDailyMovement(date) {
     state.dailyMovementLoading = false;
     render();
   }
+}
+
+// ── رسم «حركة المبيعات اليومية» ────────────────────────────────────────────
+// المنطق والرسم في src/daily-sales-chart.js؛ هنا الجلب والذاكرة فقط. طلب واحد
+// لكل شهر، والشهر الجاري وحده يُحدَّث (بعد SALES_CHART_TTL_MS أو مع زر تحديث
+// ملخص الحركة اليومية)، والأشهر المنقضية تبقى من الذاكرة.
+const SALES_CHART_TTL_MS = 5 * 60 * 1000;
+
+function salesChartCurrentMonth() {
+  const chart = window.ozkDailySalesChart;
+  return chart ? chart.monthKeyOf(chart.damascusToday()) : "";
+}
+
+async function loadSalesChartMonth(monthKey, { force = false } = {}) {
+  const chart = window.ozkDailySalesChart;
+  const range = chart?.monthRange(monthKey);
+  if (!range || !isOwner() || !dataStore.getDailySalesSeries) return;
+  if (state.salesChartLoading === monthKey) return;
+  const cached = state.salesChartCache[monthKey];
+  const isCurrent = monthKey === salesChartCurrentMonth();
+  if (cached && !force && (!isCurrent || Date.now() - cached.fetchedAt < SALES_CHART_TTL_MS)) return;
+  // فشلٌ حديث لنفس الشهر لا يُعاد تلقائياً مع كل render (لا حلقة طلبات)؛ زر التحديث يتجاوزه.
+  const failed = state.salesChartError;
+  if (!force && failed && failed.month === monthKey && Date.now() - failed.at < SALES_CHART_TTL_MS) return;
+  state.salesChartLoading = monthKey;
+  state.salesChartError = null;
+  render();
+  try {
+    const rows = await dataStore.getDailySalesSeries(range.from, range.to);
+    state.salesChartCache = { ...state.salesChartCache, [monthKey]: { rows, fetchedAt: Date.now() } };
+  } catch (error) {
+    state.salesChartError = { month: monthKey, at: Date.now(), message: safeErrorMessage(error) };
+  } finally {
+    state.salesChartLoading = "";
+    render();
+  }
+}
+
+function salesChartNavMarkup(chart, monthKey, currentMonth) {
+  return `
+    <div class="dsc-nav">
+      <button class="button secondary mini-button" type="button" data-action="sales-chart-prev" aria-label="الشهر السابق">→</button>
+      <span class="dsc-month">${escapeHtml(chart.monthLabel(monthKey))}</span>
+      <button class="button secondary mini-button" type="button" data-action="sales-chart-next" aria-label="الشهر التالي"${monthKey >= currentMonth ? " disabled" : ""}>←</button>
+      ${monthKey !== currentMonth ? '<button class="button secondary mini-button" type="button" data-action="sales-chart-today">الشهر الحالي</button>' : ""}
+    </div>`;
+}
+
+function salesChartKpisMarkup(chart, stats, isCurrentMonth) {
+  if (!stats.knownDays) return "";
+  const shortDate = (iso) => { const p = String(iso || "").split("-"); return p.length === 3 ? `${Number(p[2])}/${Number(p[1])}` : ""; };
+  const kpi = (label, value, sub) => `<div class="dsc-kpi"><div class="dsc-kpi-l">${label}</div><div class="dsc-kpi-v">${escapeHtml(value)}</div>${sub ? `<div class="dsc-kpi-s" dir="auto">${escapeHtml(sub)}</div>` : ""}</div>`;
+  return `<div class="dsc-kpis">
+        ${kpi("إجمالي الشهر", chart.formatUsd(stats.total), `أيام البيانات: ${stats.knownDays}`)}
+        ${kpi(isCurrentMonth ? "المتوسط اليومي حتى اليوم" : "المتوسط اليومي", chart.formatUsd(stats.average), "")}
+        ${kpi("أعلى يوم", chart.formatUsd(stats.max.value), shortDate(stats.max.date))}
+        ${kpi("أدنى يوم", chart.formatUsd(stats.min.value), shortDate(stats.min.date))}
+      </div>`;
+}
+
+function salesChartPendingMarkup(monthKey, loading) {
+  const failed = state.salesChartError?.month === monthKey ? state.salesChartError : null;
+  return failed && !loading
+    ? `<div class="report-status">تعذّر تحميل المبيعات: ${escapeHtml(failed.message)}</div>`
+    : `<p class="muted dsc-note">جاري تحميل مبيعات الشهر…</p>`;
+}
+
+function salesChartBodyMarkup(month, stats) {
+  if (stats.knownDays) {
+    return `<div class="dsc-chart"><div class="dsc-canvas" data-dsc-canvas tabindex="0" dir="ltr" aria-label="رسم المبيعات اليومية — مرّر أو اضغط على يوم، أو استعمل الأسهم"></div><div class="dsc-tip" data-dsc-tip hidden></div></div>`;
+  }
+  const allFuture = month.days.every((d) => d.state === "future");
+  return `<div class="report-status">${allFuture ? "هذا الشهر لم يبدأ بعد." : "لا تتوفر بيانات مبيعات لهذا الشهر."}</div>`;
+}
+
+function dailySalesChartSection() {
+  const chart = window.ozkDailySalesChart;
+  if (!chart) return "";
+  if (!isOwner()) {
+    return `<div class="dsc-panel"><div class="dsc-title">📈 حركة المبيعات اليومية</div><p class="muted dsc-note">قيم المبيعات بالدولار متاحة لحساب المالك فقط.</p></div>`;
+  }
+  const today = chart.damascusToday();
+  const currentMonth = chart.monthKeyOf(today);
+  const monthKey = state.salesChartMonth || currentMonth;
+  const cached = state.salesChartCache[monthKey];
+  const loading = state.salesChartLoading === monthKey;
+  const header = `<div class="dsc-head"><div class="dsc-title">📈 حركة المبيعات اليومية</div>${salesChartNavMarkup(chart, monthKey, currentMonth)}</div>`;
+  if (!cached) return `<div class="dsc-panel">${header}${salesChartPendingMarkup(monthKey, loading)}</div>`;
+  const month = chart.buildMonth(cached.rows, monthKey, today);
+  const stats = chart.monthStats(month);
+  const missingNote = stats.missingDays
+    ? ` · <span class="dsc-legend-missing"></span> ${stats.missingDays} ${stats.missingDays === 1 ? "يوم" : "أيام"} بلا بيانات (ليست صفراً)`
+    : "";
+  return `
+    <div class="dsc-panel" data-dsc-host data-dsc-month="${escapeHtml(monthKey)}">
+      ${header}
+      ${salesChartKpisMarkup(chart, stats, monthKey === currentMonth)}
+      ${salesChartBodyMarkup(month, stats)}
+      <p class="muted dsc-note">صافي المبيعات بالدولار من الأمين (مبيعات − حسومات − مرتجعات، بلا دفعات ولا مصاريف) بتوقيت دمشق${loading ? " · جاري التحديث…" : ""}${missingNote}</p>
+    </div>`;
 }
 
 // التكلفة للمدير فقط — تُجلب من جدول item_costs المحمي (RLS = is_owner)
@@ -9542,6 +9647,8 @@ function reportsPage() {
     <section class="panel wide reports-page">
       <p class="muted" style="margin:0 0 16px">كل التقارير في مكان واحد. اضغط على عنوان أي تقرير ليفتح للأسفل.</p>
 
+      ${dailySalesChartSection()}
+
       <details class="acc-group" open>
         <summary class="acc-summary"><span class="acc-title">📊 ملخص الحركة اليومية</span><span class="acc-count">جديد</span></summary>
         <div class="acc-body report-card">
@@ -14799,6 +14906,29 @@ function render() {
   app.querySelector("[data-action='daily-refresh']")?.addEventListener("click", () => {
     loadDailyMovement(state.dailyMovementDate || todayIsoDate());
   });
+
+  // رسم «حركة المبيعات اليومية»: تنقّل بين الأشهر، وتحديثه مع زر تحديث الملخص.
+  const salesChartGo = (key) => { state.salesChartMonth = key; render(); loadSalesChartMonth(key); };
+  app.querySelector("[data-action='sales-chart-prev']")?.addEventListener("click", () => {
+    salesChartGo(window.ozkDailySalesChart.shiftMonth(state.salesChartMonth || salesChartCurrentMonth(), -1));
+  });
+  app.querySelector("[data-action='sales-chart-next']")?.addEventListener("click", () => {
+    const next = window.ozkDailySalesChart.shiftMonth(state.salesChartMonth || salesChartCurrentMonth(), 1);
+    if (next <= salesChartCurrentMonth()) salesChartGo(next);
+  });
+  app.querySelector("[data-action='sales-chart-today']")?.addEventListener("click", () => salesChartGo(salesChartCurrentMonth()));
+  app.querySelector("[data-action='daily-refresh']")?.addEventListener("click", () => {
+    if (isOwner()) loadSalesChartMonth(salesChartCurrentMonth(), { force: true });
+  });
+  if (state.route === "dashboard" && state.session && isOwner() && window.ozkDailySalesChart) {
+    const host = app.querySelector("[data-dsc-host]");
+    const shownKey = state.salesChartMonth || salesChartCurrentMonth();
+    const cached = state.salesChartCache[shownKey];
+    if (host && cached) {
+      window.ozkDailySalesChart.mount(host, window.ozkDailySalesChart.buildMonth(cached.rows, shownKey, window.ozkDailySalesChart.damascusToday()));
+    }
+    loadSalesChartMonth(shownKey);
+  }
 
   // تحميل تقرير الحركة اليومية تلقائياً عند فتح صفحة التقارير
   if (state.route === "dashboard" && state.session && !state.dailyMovementLoading) {

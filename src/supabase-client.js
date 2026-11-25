@@ -1154,6 +1154,26 @@
       return (data && data[0]) || null;
     },
 
+    async getDailySalesSeries(fromDate, toDate) {
+      // صافي المبيعات اليومي لرسم «حركة المبيعات اليومية»: صف ameen_daily_profit
+      // الواحد لكل تاريخ. يُطلب أربعة حقول من summary فقط — لا تكلفة ولا ربح —
+      // وسياسة RLS نفسها (inventory_reports_cost_sources_owner_only) تحصر المصدر
+      // بالمالك، فلا توسيع لأي صلاحية.
+      if (!client) return [];
+      const session = await getSupabaseSession();
+      if (!session) return [];
+      const { data, error } = await client
+        .from(inventoryReportsTable)
+        .select("report_date, net_sales:summary->net_sales, sales_bill_count:summary->sales_bill_count, return_bill_count:summary->return_bill_count, synced_at:summary->>synced_at")
+        .eq("source", "ameen_daily_profit")
+        .gte("report_date", fromDate)
+        .lte("report_date", toDate)
+        .order("report_date", { ascending: true })
+        .limit(40);
+      if (error) throw new Error(translateDbError(error.message));
+      return data || [];
+    },
+
     async listCustomerBalanceReports() {
       if (!client) {
         return readJson(INVENTORY_REPORTS_KEY, []).filter((report) => report.source === "ameen_customer_balances");
