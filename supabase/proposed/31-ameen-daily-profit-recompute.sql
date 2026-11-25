@@ -16,6 +16,8 @@
 --       - لا تلمس created_at لصف موجود: البوت والمساعد ومراقب المهام يقرؤون
 --         «الأحدث» وحداثة المزامنة من created_at، فإعادة احتساب الماضي لا تخفي
 --         توقف مزامنة اليوم ولا تعرض يوماً قديماً كأنه اليوم.
+--       - الصف المُدرَج ليوم غائب يُختم created_at بآخر ثانية من يومه (دمشق)،
+--         لا now()، للسبب نفسه.
 --       - تُرجع 'inserted' أو 'updated' أو 'unchanged'.
 --   * private.ameen_daily_profit_revert_revisions(timestamptz): تعيد كل يوم تغيّر
 --     منذ لحظة معيّنة إلى ملخصه السابق، وتحذف الأيام التي أُدرجت. للمالك/SQL Editor وحده.
@@ -112,8 +114,12 @@ begin
    for update;
 
   if not found then
-    insert into public.inventory_reports (source, report_date, summary, items, created_by)
-    values ('ameen_daily_profit', p_report_date, p_summary, '[]'::jsonb, v_uid)
+    -- يُختم created_at لصف يوم ماضٍ بآخر ثانية من يومه بتوقيت دمشق، لا now():
+    -- قرّاء «الأحدث» (handleProfitToday والملخص والمساعد) ومراقب الحداثة
+    -- (max(created_at)) لا يرون إدراجاً تاريخياً أحدث من تقرير اليوم.
+    insert into public.inventory_reports (source, report_date, summary, items, created_by, created_at)
+    values ('ameen_daily_profit', p_report_date, p_summary, '[]'::jsonb, v_uid,
+            least(now(), ((p_report_date + 1)::timestamp at time zone 'Asia/Damascus') - interval '1 second'))
     on conflict (report_date) where source = 'ameen_daily_profit' do nothing
     returning * into v_row;
     if v_row.id is not null then

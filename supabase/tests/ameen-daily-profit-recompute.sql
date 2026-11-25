@@ -165,6 +165,12 @@ select pg_temp.ok(public.recompute_ameen_daily_profit(current_setting('t.d_missi
   pg_temp.summary(current_setting('t.d_missing')::date, 'recompute', 50, 20, 0, '2026-11-26T00:00:00Z')) = 'unchanged', 'second run is idempotent');
 reset role;
 select pg_temp.ok((select count(*) from public.inventory_reports where source = 'ameen_daily_profit') = 2, 'one row per date, no duplicates');
+select pg_temp.ok((select created_at from public.inventory_reports where report_date = current_setting('t.d_missing')::date)
+  = ((current_setting('t.d_missing')::date + 1)::timestamp at time zone 'Asia/Damascus') - interval '1 second',
+  'inserted past day is stamped at the end of its own day, not now()');
+select pg_temp.ok((select report_date from public.inventory_reports where source = 'ameen_daily_profit' order by created_at desc limit 1)
+  = current_setting('t.d_missing')::date and (select max(created_at) from public.inventory_reports where source = 'ameen_daily_profit') < now() - interval '8 days',
+  'historical insert does not look like a fresh sync (freshness monitor)');
 select pg_temp.ok((select count(*) from private.ameen_daily_profit_revisions) = 2, 'two revisions recorded');
 
 -- ٦) مزامنة اليوم لم تتأثر
