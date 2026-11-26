@@ -70,6 +70,10 @@
           <label for="copies">عدد النسخ</label>
           <input id="copies" type="number" min="1" value="1">
         </div>
+        <div style="grid-column:1/-1">
+          <label for="pages">الصفحات (اتركها فارغة لطباعة الكل)</label>
+          <input id="pages" type="text" autocomplete="off" placeholder="مثال: 1 أو 2 أو 1-2">
+        </div>
       </div>
       <div id="previewMsg"></div>
       <button class="print" id="printBtn" disabled>طباعة</button>
@@ -181,6 +185,7 @@
 
   async function selectInvoice(m) {
     selected = m;
+    $("pages").value = "";
     $("printBox").style.display = "";
     $("invInfo").innerHTML = `<div class="msg ok"><b>${esc(m.typeName)} رقم ${esc(m.number)}</b><br>${esc(m.customer || "—")} · ${esc(m.date)} · ${esc(money(m.total, m.currencyIso))}</div>`;
     await loadPreview();
@@ -205,6 +210,7 @@
       if (p.autoPrint && p.autoPrint.autoPrintedAt) notes.push(`<b>طُبعت تلقائياً على Canon في ${esc(fmtTime(p.autoPrint.autoPrintedAt))}</b>`);
       if (p.previousPrints && p.previousPrints.length) notes.push(`<b>طُبعت يدوياً على هذا الجهاز ${p.previousPrints.length} مرة، آخرها ${esc(fmtTime(p.previousPrints[p.previousPrints.length - 1].at))}</b>`);
       msg("previewMsg", p.fontOk ? "ok" : "err", notes.join("<br>"));
+      $("pages").placeholder = p.pages > 1 ? `الكل (1-${p.pages}) — أو اكتب مثلاً 2` : "الكل (صفحة واحدة)";
       $("printBtn").disabled = !p.fontOk;
     } catch (e) {
       if (gen === previewGen) msg("previewMsg", "err", esc(e.message));
@@ -227,7 +233,7 @@
     if (!Number.isInteger(copies) || copies < 1 || copies > maxCopies) return msg("printMsg", "err", `عدد النسخ بين 1 و${maxCopies}.`);
     busy = true; $("printBtn").disabled = true; $("printBtn").textContent = "جارٍ الإرسال…";
     try {
-      const r = await api("/api/print", { token: previewToken, copies, confirmReprint });
+      const r = await api("/api/print", { token: previewToken, copies, confirmReprint, pages: $("pages").value.trim() });
       if (r.ok) return msg("printMsg", r.dryRun ? "warn" : "ok", esc(r.message));
       if (r.code === "NEEDS_CONFIRM") {
         const prev = (r.previous || []).map((e) => `• ${esc(fmtTime(e.at))} — ${esc(e.copies)} نسخة`).join("<br>");
