@@ -365,11 +365,11 @@ function createPrinter(cfg, run = runPowerShell) {
     }
     return classifyPrinter(parseProbeLine(out));
   }
-  function send(pdfPath, paper, copies) {
+  function send(pdfPath, paper, copies, pages) {
     if (!fs.existsSync(cfg.sumatraPath)) throw new Error(`SumatraPDF غير موجود: ${cfg.sumatraPath}`);
     const r = spawnSync(cfg.sumatraPath, [
       "-print-to", cfg.printerName,
-      "-print-settings", sumatraSettings(paper, copies),
+      "-print-settings", sumatraSettings(paper, copies, pages),
       "-silent", "-exit-when-done",
       pdfPath,
     ], { timeout: 90_000, windowsHide: true });
@@ -455,6 +455,7 @@ function createApp(deps) {
     const fontOk = fontEmbedded && result.fontOk;
     guard.lookup(token).pdfPath = pdfPath;
     guard.lookup(token).fontOk = fontOk;
+    guard.lookup(token).pageCount = result.pages;
     log.append({ event: "preview", guid, number: header.number, type: header.typeName, paper: paper.label, pages: result.pages, fontOk });
     return {
       token,
@@ -485,6 +486,29 @@ function createApp(deps) {
     return n;
   }
 
+  // نطاق الصفحات: فارغ أو «الكل» = كل الصفحات، وإلا مثل «2» أو «1-2» أو «1,3».
+  // يقبل الأرقام العربية والفاصلة العربية، ويُعاد بصيغة SumatraPDF ("" = الكل).
+  function parsePages(pages, total) {
+    const raw = String(pages == null ? "" : pages).trim()
+      .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x660))
+      .replace(/[\u06F0-\u06F9]/g, (d) => String(d.charCodeAt(0) - 0x6F0))
+      .replace(/\s*[-\u2013\u2014]\s*/g, "-")
+      .replace(/[\u060C\u061B;\s]+/g, ",").replace(/,+/g, ",").replace(/^,|,$/g, "");
+    if (!raw || raw === "الكل") return "";
+    const max = Number(total) || 0;
+    const bad = () => httpError(400, max
+      ? `الصفحات يجب أن تكون بين 1 و${max} (مثال: 1 أو 1-${max} أو 1,${max})`
+      : "صيغة الصفحات غير صحيحة (مثال: 1 أو 1-2 أو 1,3)");
+    const out = raw.split(",").map((p) => {
+      const m = /^(\d{1,3})(?:-(\d{1,3}))?$/.exec(p);
+      if (!m) throw bad();
+      const a = Number(m[1]), b = m[2] ? Number(m[2]) : a;
+      if (a < 1 || b < a || (max && b > max)) throw bad();
+      return a === b ? String(a) : `${a}-${b}`;
+    });
+    return out.join(",");
+  }
+
   // شروط ما قبل الإرسال: الخط مضمَّن والطابعة جاهزة. تعيد رفضاً أو null.
   function preSendRejection(t) {
     if (cfg.requireOfficialFont && !t.fontOk) {
@@ -498,21 +522,23 @@ function createApp(deps) {
     return null;
   }
 
-  function dispatchToPrinter(t, n, reprint) {
+  function dispatchToPrinter(t, n, reprint, pg) {
     const paper = paperFor(t.paper, cfg);
-    const base = { guid: t.guid, number: t.number, copies: n, paper: paper.label };
+    const base = { guid: t.guid, number: t.number, copies: n, paper: paper.label, pages: pg || "all" };
     log.append({ event: "print_requested", ...base, reprint, dryRun: Boolean(cfg.dryRun) });
     if (cfg.dryRun) {
       log.append({ event: "dry_run", ...base, printer: cfg.printerName });
       return { ok: true, dryRun: true, message: "وضع الاختبار: لم يُرسل شيء للطابعة (dryRun)." };
     }
-    printer.send(t.pdfPath, paper, n);
+    printer.send(t.pdfPath, paper, n, pg);
     log.append({ event: "print_sent", ...base, printer: cfg.printerName, reprint });
-    return { ok: true, message: `أُرسلت ${n} نسخة إلى ${cfg.printerName}` };
+    return { ok: true, message: `أُرسلت ${n} نسخة${pg ? ` (الصفحات ${pg})` : ""} إلى ${cfg.printerName}` };
   }
 
-  async function print(token, copies, confirmReprint) {
+  async function print(token, copies, confirmReprint, pages) {
     const n = parseCopies(copies);
+    const t0 = guard.lookup(token);
+    const pg = parsePages(pages, t0 && t0.pageCount);
     const g = guard.begin(token, { confirmReprint: Boolean(confirmReprint) });
     if (!g.ok) {
       const t = guard.lookup(token);
@@ -527,7 +553,7 @@ function createApp(deps) {
         log.append({ event: "print_rejected", guid: t.guid, number: t.number, code: rejected.code, printer: rejected.printer });
         return rejected;
       }
-      const result = dispatchToPrinter(t, n, g.reprint);
+      const result = dispatchToPrinter(t, n, g.reprint, pg);
       success = true;
       return result;
     } catch (err) {
@@ -643,7 +669,7 @@ function createHttpHandler(app, cfg, sessionKey) {
     },
     "POST /api/print": async (req) => {
       const body = await readJson(req);
-      return [200, await app.print(String(body.token || ""), body.copies, body.confirmReprint === true)];
+      return [200, await app.print(String(body.token || ""), body.copies, body.confirmReprint === true, body.pages)];
     },
   };
 

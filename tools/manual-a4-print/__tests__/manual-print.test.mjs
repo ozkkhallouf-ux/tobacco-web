@@ -13,7 +13,7 @@ const { assertReadOnlySql } = require(path.join(dir, "lib", "sql-guard.js"));
 const model = require(path.join(dir, "lib", "invoice-model.js"));
 const { createPrintGuard, REPRINT_COOLDOWN_MS } = require(path.join(dir, "lib", "print-guard.js"));
 const { createPrintLog } = require(path.join(dir, "lib", "print-log.js"));
-const { paperFor } = require(path.join(dir, "lib", "paper.js"));
+const { paperFor, sumatraSettings } = require(path.join(dir, "lib", "paper.js"));
 const server = require(path.join(dir, "server.js"));
 
 const WHOLESALE = "7f5b0921-61f3-4f23-a1f4-fbfae4144bf4";
@@ -274,11 +274,11 @@ function makeApp(over) {
   const printerState = { value: { state: "ready" } };
   const printer = {
     probe: () => printerState.value,
-    send: (pdf, paper, copies) => { assert.ok(fs.existsSync(pdf)); sent.push({ paper: paper.label, copies }); },
+    send: (pdf, paper, copies, pages) => { assert.ok(fs.existsSync(pdf)); sent.push({ paper: paper.label, copies, pages }); },
   };
   const renderer = cfg.browserPath ? server.createRenderer(cfg) : {
     browserPath: () => "",
-    render: async (_html, _paper, out) => { fs.writeFileSync(out, "%PDF-1.4 /Type /Page"); return { fontOk: true, pages: 1, bytes: 10 }; },
+    render: async (_html, _paper, out) => { fs.writeFileSync(out, "%PDF-1.4 /Type /Page"); return { fontOk: true, pages: cfg.fakePages || 1, bytes: 10 }; },
     close: async () => {},
   };
   const ameen = fakeAmeen();
@@ -356,6 +356,28 @@ test("طباعة فعلية (وهمية): نقرتان متزامنتان ⇒ إ
   const again = await app.print(p2.token, 1, true);
   assert.equal(again.code, "COOLDOWN");
   assert.equal(sent.length, 1);
+});
+
+test("نطاق الصفحات: فارغ أو «الكل» = الكل، وصيغ 2 و1-2 و1,3 بالأرقام العربية، وخارج المعاينة مرفوض", async () => {
+  assert.equal(sumatraSettings({ sumatraPaper: "A4" }, 2, ""), "2x,paper=A4");
+  assert.equal(sumatraSettings({ sumatraPaper: "A4" }, 1, "1-2"), "1-2,1x,paper=A4");
+
+  const cases = [["", ""], ["الكل", ""], ["٢", "2"], ["١ - ٢", "1-2"], ["1،3", "1,3"], [" 1, 3 ", "1,3"]];
+  for (const [input, expected] of cases) {
+    const { app, sent, log } = makeApp({ browserPath: "", dryRun: false, fakePages: 3 });
+    for (const m of await app.search(42)) app.knownNumbers.set(m.guid, 42);
+    const p = await app.preview(G1, "A4");
+    for (const bad of ["4", "2-1", "0", "أ"]) {
+      await assert.rejects(app.print(p.token, 1, false, bad), /بين 1 و3/, `«${bad}» مرفوض`);
+    }
+    assert.equal(sent.length, 0, "الرفض لا يرسل شيئاً");
+    const r = await app.print(p.token, 1, false, input);
+    assert.equal(r.ok, true, `«${input}»`);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].pages, expected, `«${input}» ⇒ «${expected}»`);
+    const evt = log.readAll().find((e) => e.event === "print_sent");
+    assert.equal(evt.pages, expected || "all");
+  }
 });
 
 test("عدد نسخ خارج الحد مرفوض، والطابعة غير الجاهزة تمنع الإرسال", async () => {

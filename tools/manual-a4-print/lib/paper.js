@@ -40,8 +40,9 @@ function applyPaperCss(html, paper) {
   return String(html).replace("</head>", `<style>${paper.css}</style>\n</head>`);
 }
 
-function sumatraSettings(paper, copies) {
-  return `${copies}x,paper=${paper.sumatraPaper}`;
+// pages: نطاق SumatraPDF مثل «2» أو «1-2» أو «1,3»؛ فارغ = كل الصفحات.
+function sumatraSettings(paper, copies, pages) {
+  return `${pages ? pages + "," : ""}${copies}x,paper=${paper.sumatraPaper}`;
 }
 
 module.exports = { PAPERS, paperFor, pdfOptions, sumatraSettings, applyPaperCss };
