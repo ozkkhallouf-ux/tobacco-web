@@ -345,6 +345,13 @@ jobs:
       # نبض مزامنة الأسعار (حادثة 2026-10-18): الناشر يكتب حمولة صحيحة ويخنق فحص
       # المهمة ويخرج دائماً بصفر، والمنسِّق ينشر نبضاً في كل مسار خروج دون تغيير
       # رموز خروجه ولا تنبيهاته القديمة. كله بوضع -DryRun وبدائل وهمية.
+      # مطابقة الأرباح (2026-11-25): الأيام الماضية كانت لقطات مجمّدة. معادلة الربح صارت في مكتبة
+      # واحدة يشاركها سكربت اليوم وسكربت إعادة الاحتساب؛ الاختبار يثبت المعادلة والتعبئة الصفرية
+      # للأيام بلا حركة وثبات JSON تحت ثقافة بفاصلة عشرية، على 5.1 تحديداً — بلا SQL.
+      - name: Daily profit - shared formula and range test
+        shell: powershell
+        run: .\tools\tests\Test-DailyProfitLib.ps1
+
       - name: Price sync heartbeat - publisher test
         shell: powershell
         run: .\tools\tests\Test-PriceSyncHeartbeat.ps1

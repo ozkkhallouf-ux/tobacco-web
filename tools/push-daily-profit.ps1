@@ -41,6 +41,8 @@ function Write-Log($Message) {
 }
 
 function Notify-Failure($Message) {
+    # التشغيل التجريبي لا يرسل تنبيه فشل حقيقياً إلى تيليغرام.
+    if ($DryRun) { return }
     try {
         & "$PSScriptRoot\send-telegram-notification.ps1" `
             -Message $Message -EventType "sync_failure" -DedupeKey "winfail:push-daily-profit" `
@@ -63,118 +65,23 @@ if (-not $apiKey -or -not $syncEmail -or -not $syncPassword) {
     exit 1
 }
 
-# مصاريف التشغيل المعتمدة. مصاريف نقل المشتريات مستثناة لأنها جزء من
-# تكلفة البضاعة، وإدخالها هنا مرة ثانية يضاعف التكلفة.
-$EXPENSE_PARENT_GUID = "6AE0066F-D39E-4805-83D5-B8DA92F7D7F1"
-
-$sql = @"
-;WITH BillCost AS (
-    SELECT
-        u.GUID,
-        bt.BillType,
-        CAST(COALESCE(u.Total, 0) AS float) AS gross_amount,
-        CAST(COALESCE(u.TotalDisc, 0) AS float) AS discount_amount,
-        CAST(COALESCE(u.TotalExtra, 0) AS float) AS extra_amount,
-        SUM(CAST(COALESCE(bi.Qty, 0) * COALESCE(bi.UnitCostPrice, 0) AS float)) AS item_cost,
-        SUM(CASE WHEN bi.UnitCostPrice IS NULL OR bi.UnitCostPrice <= 0 THEN 1 ELSE 0 END) AS missing_cost_lines,
-        COUNT(*) AS line_count
-    FROM bu000 u
-    JOIN bt000 bt ON bt.GUID = u.TypeGUID
-    JOIN bi000 bi ON bi.ParentGUID = u.GUID
-    WHERE bt.BillType IN (1, 3)
-      AND u.Date >= CAST(GETDATE() AS date)
-      AND u.Date < DATEADD(day, 1, CAST(GETDATE() AS date))
-    GROUP BY u.GUID, bt.BillType, u.Total, u.TotalDisc, u.TotalExtra
-), Expense AS (
-    SELECT
-        CAST(COALESCE(SUM(COALESCE(en.Debit, 0) - COALESCE(en.Credit, 0)), 0) AS float) AS amount,
-        COUNT(*) AS entry_count
-    FROM en000 en
-    JOIN ac000 a ON a.GUID = en.AccountGUID
-    WHERE a.ParentGUID = '$EXPENSE_PARENT_GUID'
-      AND en.Date >= CAST(GETDATE() AS date)
-      AND en.Date < DATEADD(day, 1, CAST(GETDATE() AS date))
-      AND (COALESCE(en.Debit, 0) <> 0 OR COALESCE(en.Credit, 0) <> 0)
-)
-SELECT
-    CAST(GETDATE() AS date) AS report_date,
-    COALESCE(SUM(CASE WHEN b.BillType = 1 THEN b.gross_amount ELSE 0 END), 0) AS sales_gross,
-    COALESCE(SUM(CASE WHEN b.BillType = 1 THEN b.discount_amount ELSE 0 END), 0) AS sales_discounts,
-    COALESCE(SUM(CASE WHEN b.BillType = 1 THEN b.extra_amount ELSE 0 END), 0) AS sales_extras,
-    COALESCE(SUM(CASE WHEN b.BillType = 1 THEN b.item_cost ELSE 0 END), 0) AS sales_cost,
-    COALESCE(SUM(CASE WHEN b.BillType = 3 THEN b.gross_amount ELSE 0 END), 0) AS returns_gross,
-    COALESCE(SUM(CASE WHEN b.BillType = 3 THEN b.discount_amount ELSE 0 END), 0) AS returns_discounts,
-    COALESCE(SUM(CASE WHEN b.BillType = 3 THEN b.extra_amount ELSE 0 END), 0) AS returns_extras,
-    COALESCE(SUM(CASE WHEN b.BillType = 3 THEN b.item_cost ELSE 0 END), 0) AS returns_cost,
-    COALESCE(SUM(CASE WHEN b.BillType = 1 THEN 1 ELSE 0 END), 0) AS sales_bill_count,
-    COALESCE(SUM(CASE WHEN b.BillType = 3 THEN 1 ELSE 0 END), 0) AS return_bill_count,
-    COALESCE(SUM(b.line_count), 0) AS line_count,
-    COALESCE(SUM(b.missing_cost_lines), 0) AS missing_cost_lines,
-    e.amount AS expenses,
-    e.entry_count AS expense_entry_count
-FROM Expense e
-LEFT JOIN BillCost b ON 1 = 1
-GROUP BY e.amount, e.entry_count
-"@
+# المعادلة والاستعلام في مكان واحد يشاركه سكربت إعادة احتساب الأيام الماضية
+# (recompute-daily-profit.ps1)، فلا تنحرف معادلة اليوم عن معادلة الأيام السابقة.
+. "$PSScriptRoot\daily-profit-lib.ps1"
 
 try {
-    Add-Type -AssemblyName "System.Data"
-    $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
-    $conn.Open()
-    $cmd = $conn.CreateCommand()
-    $cmd.CommandText = $sql
-    $cmd.CommandTimeout = 180
-    $reader = $cmd.ExecuteReader()
-    if (-not $reader.Read()) { throw "لم يرجع استعلام الربح أي نتيجة." }
+    $conn = New-AmeenReadOnlyConnection -ConnectionString $connStr -ApplicationName "ozk-daily-profit-today"
+    try {
+        # اليوم بتقويم خادم الأمين نفسه (CAST(GETDATE() AS date)) كما كان دائماً.
+        $reportDate = Get-DailyProfitServerToday $conn
+        $rows = Get-DailyProfitRows -Connection $conn -From $reportDate -To $reportDate -TimeoutSeconds 180
+    } finally { $conn.Close() }
+    if ($rows.Count -ne 1) { throw "لم يرجع استعلام الربح نتيجة واحدة لليوم." }
 
-    $reportDate = ([datetime]$reader["report_date"]).ToString("yyyy-MM-dd")
-    $salesGross = [double]$reader["sales_gross"]
-    $discounts = [double]$reader["sales_discounts"]
-    $salesExtras = [double]$reader["sales_extras"]
-    $salesCost = [double]$reader["sales_cost"]
-    $returnsGross = [double]$reader["returns_gross"]
-    $returnsDiscounts = [double]$reader["returns_discounts"]
-    $returnsExtras = [double]$reader["returns_extras"]
-    $returnsCost = [double]$reader["returns_cost"]
-    $expenses = [double]$reader["expenses"]
-    $salesBillCount = [int]$reader["sales_bill_count"]
-    $returnBillCount = [int]$reader["return_bill_count"]
-    $lineCount = [int]$reader["line_count"]
-    $missingCostLines = [int]$reader["missing_cost_lines"]
-    $expenseEntryCount = [int]$reader["expense_entry_count"]
-    $reader.Close()
-    $conn.Close()
-
-    $netReturns = $returnsGross - $returnsDiscounts + $returnsExtras
-    $netSales = $salesGross - $discounts + $salesExtras - $netReturns
-    $netCost = $salesCost - $returnsCost
-    $productMargin = $salesGross - $salesCost
-    $grossProfit = $netSales - $netCost
-    $netProfit = $grossProfit - $expenses
-
-    $summary = [ordered]@{
-        report_date = $reportDate
-        currency = "USD"
-        sales_gross = [math]::Round($salesGross, 4)
-        sales_cost = [math]::Round($salesCost, 4)
-        product_margin_before_adjustments = [math]::Round($productMargin, 4)
-        discounts = [math]::Round($discounts, 4)
-        sales_extras = [math]::Round($salesExtras, 4)
-        returns = [math]::Round($netReturns, 4)
-        returns_cost = [math]::Round($returnsCost, 4)
-        net_sales = [math]::Round($netSales, 4)
-        net_cost = [math]::Round($netCost, 4)
-        gross_profit = [math]::Round($grossProfit, 4)
-        expenses = [math]::Round($expenses, 4)
-        net_profit = [math]::Round($netProfit, 4)
-        sales_bill_count = $salesBillCount
-        return_bill_count = $returnBillCount
-        expense_entry_count = $expenseEntryCount
-        line_count = $lineCount
-        missing_cost_lines = $missingCostLines
-        complete = ($missingCostLines -eq 0)
-        synced_at = (Get-Date).ToUniversalTime().ToString("o")
-    }
+    $summary = New-DailyProfitSummary -Row $rows[0] -SyncMode "today"
+    $salesGross = $summary.sales_gross
+    $netProfit = $summary.net_profit
+    $missingCostLines = $summary.missing_cost_lines
 
     Write-Log ("تم الحساب: مبيعات {0:N2}$ | ربح صافي {1:N2}$ | أسطر تكلفة ناقصة {2}" -f $salesGross, $netProfit, $missingCostLines)
     if ($DryRun) {
