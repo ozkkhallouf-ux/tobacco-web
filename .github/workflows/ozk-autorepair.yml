@@ -55,6 +55,8 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           ACTOR_TYPE: ${{ github.event.workflow_run.actor.type }}
           RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          MODE: ${{ vars.OZK_AUTOREPAIR_MODE }}
+          ALLOWED_RUN_ID: ${{ vars.OZK_AUTOREPAIR_PROPOSE_TEST_RUN_ID }}
         run: |
           set -euo pipefail
           no() { echo "skip: $1"; echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0; }
@@ -64,6 +66,15 @@ jobs:
           [ "$ACTOR_TYPE" != "Bot" ]           || no "loop guard: bot actor"
           [ "$RUN_ATTEMPT" = "1" ]             || no "re-run ignored"
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]  || no "bad sha"
+          # قفل اختبار مؤقت: في وضع propose فقط، لا يُسمح بالمرور إلا لمعرّف تشغيل
+          # (RUN_ID، أي github.event.workflow_run.id للفحص الفاشل نفسه) مسجَّل مسبقاً صريحاً
+          # عبر متغيّر المستودع OZK_AUTOREPAIR_PROPOSE_TEST_RUN_ID. غيابه أو عدم تطابقه
+          # يُحجَب هنا قبل أي قراءة لسجل الفشل وقبل analyze/Claude وقبل أي صلاحية كتابة في
+          # propose. لا يغيّر شيئاً في وضع shadow (الشرط لا يُقيَّم إلا إذا MODE=propose).
+          if [ "$MODE" = "propose" ]; then
+            [[ "$ALLOWED_RUN_ID" =~ ^[0-9]+$ ]] || no "propose test allowlist not set or invalid"
+            [ "$RUN_ID" = "$ALLOWED_RUN_ID" ]    || no "propose test allowlist mismatch (RUN_ID=$RUN_ID)"
+          fi
           # تصنيف الفشل (منفذ pipeline/policy.js) قبل أي استدعاء لـClaude — fail-closed:
           # أي فشل لا يطابق فئة "قابلة للإصلاح تلقائياً" (أو تعذّر جلب سجله) يُصنَّف unknown ويُحجَب هنا،
           # فلا يُستهلَك سقف يومي ولا تُستدعى Claude على أعطال لا تصلح لإصلاح آلي أصلاً.
