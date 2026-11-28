@@ -225,7 +225,7 @@ console.log("\n== wholesale-regression: «تدوير» الإجمالي TotalExt
 
 // قيد الأمين (مثبت على AmnDb002 في 68/68 فاتورة جملة): أثر الفاتورة على الحساب =
 // Total − TotalDisc + TotalExtra − FirstPay. أرقام اصطناعية كلها، بلا بيانات زبائن.
-const { buildInvoiceHtml, invoiceSummary } = createRequire(import.meta.url)(path.join(AUTOPRINT_DIR, "invoice-html.js"));
+const { buildInvoiceHtml, invoiceSummary, quantityTotals } = createRequire(import.meta.url)(path.join(AUTOPRINT_DIR, "invoice-html.js"));
 const ITEMS = [{ name: "صنف أ", qty: 2, unit: "كرتونة" }, { name: "صنف ب", qty: 1.5, unit: "علبة" }];
 function sumInv(patch) {
   return { number: 1, date: "2026-10-26", customer: "زبون اختبار", currencyIso: "USD", currencyVal: 1,
@@ -238,6 +238,14 @@ function closingRows(html) {
     .map((m) => [m[1], m[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()]);
 }
 const noFont = (html) => html.replace(/<style>@font-face[^<]*<\/style>/, "<style></style>");
+// إضافة «إجمالي الكميات» (2026-11-28) هي الفرق الوحيد المعتمد عن بصمات 27311e2: قاعدة CSS
+// واحدة، وسطر «إجمالي الفاتورة» الذي صار يحمل الكمية تحت عمودها والمبلغ بجانبها. هذا
+// التحويل يعيد ذلك السطر إلى شكله القديم حرفياً (والمبلغ نفسه ينتقل كما هو)، فأي فرق آخر
+// — رقم أو صف أو نص — يُسقط البصمة.
+const legacyTotalRow = (html) => html
+  .replace("\n  .totrow .tot-amt { float:left; }", "")
+  .replace(/<tr class="totrow">\n {8}<td colspan="2">إجمالي الفاتورة<span class="tot-amt">([\s\S]*?)<\/span><\/td>\n {8}<td>[^\n]*<\/td>\n {6}<\/tr>/,
+    '<tr class="totrow">\n        <td colspan="2">إجمالي الفاتورة</td>\n        <td>$1</td>\n      </tr>');
 const sha = (text) => crypto.createHash("sha256").update(text).digest("hex");
 
 await test("تدوير ١: فاتورة بلا تدوير ⇒ ناتج main نفسه بايتاً ببايت (بصمات مرجعية من 27311e2، بلا الخط المضمَّن)", () => {
@@ -250,7 +258,7 @@ await test("تدوير ١: فاتورة بلا تدوير ⇒ ناتج main نف
   for (const [inv, hash] of goldens) {
     for (const extra of [undefined, 0, -0, null, "0", NaN]) {
       const html = buildInvoiceHtml(extra === undefined ? inv : { ...inv, extra });
-      assert.equal(sha(noFont(html)), hash, `فاتورة ${inv.number} extra=${String(extra)}: تغيّر الناتج`);
+      assert.equal(sha(legacyTotalRow(noFont(html))), hash, `فاتورة ${inv.number} extra=${String(extra)}: تغيّر الناتج`);
       assert.ok(!html.includes("تدوير"), "سطر تدوير بلا تدوير");
     }
   }
@@ -261,7 +269,54 @@ await test("تدوير ٢: تدوير وحده (3000.98 + 0.02) ⇒ سطر «ت�
   const html = buildInvoiceHtml(sumInv({ total: 3000.98, extra: 0.02 }));
   assert.deepEqual(closingRows(html).slice(0, 4), [["تدوير", "$ 0.02"], ["الصافي", "$ 3,001"], ["المدفوع", "$ 0"], ["المتبقي من هذه الفاتورة", "$ 3,001"]]);
   assert.match(html, /<div class="big"><span dir="ltr">\$ 3,000.98<\/span><\/div>/, "صندوق إجمالي الفاتورة تغيّر");
-  assert.match(html, /<td colspan="2">إجمالي الفاتورة<\/td>\s*<td><span dir="ltr">\$ 3,000.98<\/span><\/td>/, "سطر مجموع الأسطر تغيّر");
+  assert.match(html, /<td colspan="2">إجمالي الفاتورة<span class="tot-amt"><span dir="ltr">\$ 3,000.98<\/span><\/span><\/td>\s*<td>2 كرتونة<br>1.5 علبة<\/td>/, "سطر مجموع الأسطر تغيّر");
+});
+
+// ===== إجمالي الكميات في سطر «إجمالي الفاتورة» (2026-11-28) =====
+const totRow = (html) => {
+  const m = html.match(/<tr class="totrow">([\s\S]*?)<\/tr>/);
+  return m ? [...m[1].matchAll(/<td([^>]*)>([\s\S]*?)<\/td>/g)].map((c) => [c[1].trim(), c[2]]) : null;
+};
+
+await test("إجمالي الكميات ١: مجموع الكميات الفعلية لا عدد الأسطر، وبالكسور بلا تقريب خاطئ", () => {
+  const items = [{ name: "أ", qty: 2.5, unit: "كرتونة" }, { name: "ب", qty: 0.25, unit: "كرتونة" },
+    { name: "ج", qty: 3, unit: "كرتونة" }, { name: "د", qty: 0.125, unit: "كرتونة" }];
+  assert.deepEqual(quantityTotals(items), [{ qty: 5.875, unit: "كرتونة" }]);
+  // 0.1 + 0.2 بالفاصلة العائمة = 0.30000000000000004؛ المطبوع يجب أن يكون 0.3 تماماً.
+  assert.deepEqual(quantityTotals([{ qty: 0.1, unit: "كف" }, { qty: 0.2, unit: "كف" }]), [{ qty: 0.3, unit: "كف" }]);
+  // عشرة أسطر 0.001 = 0.01 (لا 0.009999…)، وأسطر كثيرة لا تتراكم فيها أخطاء.
+  assert.deepEqual(quantityTotals(Array.from({ length: 10 }, () => ({ qty: 0.001, unit: "كف" }))), [{ qty: 0.01, unit: "كف" }]);
+  const html = buildInvoiceHtml(sumInv({ items }));
+  assert.deepEqual(totRow(html)?.[1], ["", "5.875 كرتونة"], "الكمية ليست تحت عمودها");
+});
+
+await test("إجمالي الكميات ٢: وحدتان مختلفتان لا تُجمعان — لكل وحدة مجموعها بترتيب أول ظهور", () => {
+  const items = [{ qty: 2, unit: "كرتونة" }, { qty: 107.6, unit: "كف" }, { qty: 1.5, unit: "كرتونة" }, { qty: 20.4, unit: "كف" }];
+  assert.deepEqual(quantityTotals(items), [{ qty: 3.5, unit: "كرتونة" }, { qty: 128, unit: "كف" }]);
+  assert.equal(totRow(buildInvoiceHtml(sumInv({ items })))[1][1], "3.5 كرتونة<br>128 كف");
+});
+
+await test("إجمالي الكميات ٣: كمية غير رقمية في أي سطر ⇒ لا مجموع (بدل مجموع ناقص)، وبلا أسطر ⇒ خانة فارغة", () => {
+  for (const bad of [undefined, null, "", "abc", NaN, Infinity]) {
+    assert.deepEqual(quantityTotals([{ qty: 2, unit: "كرتونة" }, { qty: bad, unit: "كرتونة" }]), [], `qty=${String(bad)}`);
+  }
+  assert.equal(totRow(buildInvoiceHtml(sumInv({ items: [] })))[1][1], "");
+});
+
+await test("إجمالي الكميات ٤: بلا أسعار ⇒ ثلاث خانات (التسمية والمبلغ | الكمية)؛ بالأسعار ⇒ الكمية تحت عمودها وسعر الوحدة فارغ", () => {
+  const plain = totRow(buildInvoiceHtml(sumInv({ total: 177.86 })));
+  assert.deepEqual(plain, [['colspan="2"', 'إجمالي الفاتورة<span class="tot-amt"><span dir="ltr">$ 177.86</span></span>'], ["", "2 كرتونة<br>1.5 علبة"]]);
+  const priced = totRow(buildInvoiceHtml(sumInv({ total: 177.86, items: ITEMS.map((it) => ({ ...it, unitPrice: 1, lineTotal: 1 })) }), { linePrices: true }));
+  assert.deepEqual(priced, [['colspan="2"', "إجمالي الفاتورة"], ["", "2 كرتونة<br>1.5 علبة"], ['class="num"', ""],
+    ['class="num"', '<span dir="ltr">$ 177.86</span>']]);
+});
+
+await test("إجمالي الكميات ٥: لا يمسّ أي مبلغ — الإجمالي والصافي والمتبقي والرصيد كما هي", () => {
+  const inv = sumInv({ total: 3000.98, extra: 0.02, discount: 1, firstPay: 50, customerBalanceFound: true, customerBalance: 12 });
+  const withQty = buildInvoiceHtml(inv);
+  const noQty = buildInvoiceHtml({ ...inv, items: inv.items.map((it) => ({ ...it, qty: "x" })) });
+  assert.deepEqual(closingRows(withQty), closingRows(noQty));
+  assert.deepEqual(invoiceSummary(inv), { extra: 0.02, net: 3000, remaining: 2950 });
 });
 
 await test("تدوير ٣: تدوير مع مدفوع (9.99 + 0.01 − 5 ⇒ 5) وتدوير كبير بخانتين (111.51 + 20.49 − 50 ⇒ 82)", () => {

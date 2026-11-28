@@ -146,6 +146,14 @@ const NOTE_NEUTRAL = "هذا سند رسمي بقيمة البضاعة المر�
 // في عنصرها والعبارة في <bdi>. نص الملاحظة يُقارن بلا وسم العزل، والعزل يُفحص في قسمه.
 const BRAND_ISOLATED = "<span> </span><bdi>OZK TOBACCO</bdi>";
 const unisolate = (html) => html.split(BRAND_ISOLATED).join(" OZK TOBACCO");
+// سطر «الإجمالي» أسفل جدول الأصناف (2026-11-28): قاعدة CSS للسطر، وحشوة خلايا الأصناف
+// 3px ⇒ 2px تعويضاً عن ارتفاعه كي تبقى الورقة الواحدة حتى 15 صنفاً، والسطر نفسه آخر
+// <tbody>. حذف هذه الثلاثة نصياً يعيد البصمات المعتمدة حرفياً، فلا نص ولا رقم ولا صف آخر تغيّر.
+const TOTAL_ROW_STYLE = "\n.ozk-inv .items-table tr.items-total td{background:#ece6d4;font-weight:900}";
+const untotal = (html) => html
+  .replace(TOTAL_ROW_STYLE, "")
+  .replace(".ozk-inv .items-table td{padding:2px 8px}", ".ozk-inv .items-table td{padding:3px 8px}")
+  .replace(/<tr class="items-total">[\s\S]*?<\/tr><\/tbody>/, "</tbody>");
 const noteHtmlOf = (html) => { const m = html.match(/<p class="muted" style="margin:8px 0 0">([\s\S]*?)<\/p>/); return m ? m[1] : null; };
 const noteOf = (html) => { const n = noteHtmlOf(html); return n === null ? null : unisolate(n); };
 const BALANCE_WORDS = /الرصيد|رصيد الحساب|\(عليكم\)|\(لكم\)|مسدّد/;
@@ -327,13 +335,16 @@ const GOLDEN = [
 // صف، نص، تخطيط) يُسقط الفحص. وعدد مواضع العزل مثبت: اثنان في القالب الرئيسي (الملاحظة
 // والتذييل)، وصفر في القالب القديم.
 if (process.argv.includes("--print-golden")) {
-  for (const [label, v] of GOLDEN) console.log(`${sha(unisolate(voucherPdfMarkup(v)))}  ${label}`);
+  for (const [label, v] of GOLDEN) console.log(`${sha(untotal(unisolate(voucherPdfMarkup(v))))}  ${label}`);
   process.exit(0);
 }
 for (const [label, v, hash] of GOLDEN) {
   test(`لم يتغيّر إلا عزل OZK TOBACCO: ${label}`, () => {
     const html = voucherPdfMarkup(v);
-    assert.equal(sha(unisolate(html)), hash, "مخرجات مستند غير المرتجع تغيّرت بأكثر من عزل OZK TOBACCO");
+    assert.equal(sha(untotal(unisolate(html))), hash, "مخرجات مستند غير المرتجع تغيّرت بأكثر من عزل OZK TOBACCO وسطر الإجمالي");
+    const lines = Array.isArray(v.lines) ? v.lines.length : 0;
+    const totals = html.split('<tr class="items-total">').length - 1;
+    assert.equal(totals, html.includes('class="ozk-inv"') && lines > 0 ? 1 : 0, `سطور الإجمالي ${totals}`);
     const isolated = html.split(BRAND_ISOLATED).length - 1;
     assert.equal(isolated, html.includes('class="ozk-inv"') ? 2 : 0, `مواضع العزل ${isolated}`);
   });

@@ -76,6 +76,26 @@ function pricedItems(items) {
   return items.length > 0 && items.every((it) => Number.isFinite(it.unitPrice) && Number.isFinite(it.lineTotal));
 }
 
+// إجمالي الكميات لسطر «إجمالي الفاتورة»: مجموع الكميات المطبوعة في عمود الكمية، لا عدد
+// الأسطر. الجمع بأجزاء الألف صحيحةً كي لا يظهر 0.30000000000000004، والكمية تصل أصلاً
+// مقرّبة لثلاث منازل (round3 في lib/invoice-model.js) وتُطبع بها، فالمجموع = مجموع المطبوع.
+// لا تُجمع وحدتان مختلفتان: لكل وحدة مجموعها بترتيب أول ظهور. وكمية غير رقمية في أي سطر
+// ⇐ لا مجموع إطلاقاً بدل مجموع ناقص. لا يمسّ أي مبلغ.
+function quantityTotals(items) {
+  const totals = new Map();
+  for (const it of items) {
+    const qty = Number(it.qty);
+    if (it.qty === null || it.qty === undefined || it.qty === "" || !Number.isFinite(qty)) return [];
+    const unit = String(it.unit == null ? "" : it.unit).trim();
+    totals.set(unit, (totals.get(unit) || 0) + Math.round(qty * 1000));
+  }
+  return [...totals].map(([unit, milli]) => ({ qty: milli / 1000, unit }));
+}
+
+function quantityTotalHtml(items) {
+  return quantityTotals(items).map((t) => `${money(t.qty)} ${esc(t.unit)}`.trim()).join("<br>");
+}
+
 function buildInvoiceHtml(inv, { linePrices = false } = {}) {
   const items = Array.isArray(inv.items) ? inv.items : [];
   const { extra, net, remaining } = invoiceSummary(inv);
@@ -135,6 +155,7 @@ function buildInvoiceHtml(inv, { linePrices = false } = {}) {
   td { padding:7px 8px; border:1px solid var(--line); }
   tr:nth-child(even) td { background:var(--cream); }
   .totrow td { background:var(--card); font-weight:900; }
+  .totrow .tot-amt { float:left; }
   .rows { margin:10px 0; }
   .row { display:flex; justify-content:space-between; padding:9px 4px;
          border-bottom:1px dashed var(--line); font-size:14px; }
@@ -198,9 +219,15 @@ ${priced ? PRICE_CSS : ""}</head>
       <thead><tr><th>#</th><th>الصنف</th><th>الكمية</th>${priced ? `<th class="num">سعر الوحدة</th><th class="num">الإجمالي</th>` : ""}</tr></thead>
       <tbody>
       ${rows}
-      <tr class="totrow">
-        <td colspan="${priced ? 4 : 2}">إجمالي الفاتورة</td>
-        <td>${amt(inv, inv.total)}</td>
+      <tr class="totrow">${priced
+        ? `
+        <td colspan="2">إجمالي الفاتورة</td>
+        <td>${quantityTotalHtml(items)}</td>
+        <td class="num"></td>
+        <td class="num">${amt(inv, inv.total)}</td>`
+        : `
+        <td colspan="2">إجمالي الفاتورة<span class="tot-amt">${amt(inv, inv.total)}</span></td>
+        <td>${quantityTotalHtml(items)}</td>`}
       </tr>
       </tbody>
     </table>
@@ -240,4 +267,4 @@ ${priced ? PRICE_CSS : ""}</head>
 </html>`;
 }
 
-module.exports = { buildInvoiceHtml, invoiceSummary, officialFont };
+module.exports = { buildInvoiceHtml, invoiceSummary, officialFont, quantityTotals };

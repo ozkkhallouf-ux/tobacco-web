@@ -332,7 +332,8 @@ test("سطر التاريخ في الدفتر معزول أيضاً", () => {
 });
 
 test("خلايا سعر الوحدة وقيمة السطر معزولة بـbdi، والكمية مركَّبة بالتخطيط", () => {
-  const body = reference.slice(reference.indexOf("<tbody>"), reference.indexOf("</tbody>"));
+  // أسطر الأصناف وحدها: سطر «الإجمالي» الأخير له عقده الخاص أدناه.
+  const body = reference.slice(reference.indexOf("<tbody>"), reference.indexOf('<tr class="items-total">'));
   const cells = [...body.matchAll(/<td>(.*?)<\/td>/g)].map((m) => m[1]);
   // أربع خلايا لكل سطر: الأولى (المادة) عربية خالصة بلا عزل، والأخيرتان معزولتان.
   // أما الكمية فلا تُعزَل بـbdi عمداً: العزل يترك التركيب البصري لخوارزمية
@@ -532,6 +533,64 @@ test("كمية بلا وحدة كبرى: جزء واحد بلا توضيح", () 
   const parts = own(invoiceLineQtyParts({ qty: 6, unit1: "كروز" }));
   assert.deepEqual(parts, { value: "6", unit: "كروز", detailValue: "", detailUnit: "" });
   assert.equal(invoiceLineQty({ qty: 6, unit1: "كروز" }), "6 كروز");
+});
+
+// ===== سطر «الإجمالي» أسفل جدول الأصناف (2026-11-28) =====
+//
+// المطلوب: مجموع الكميات الفعلية (لا عدد الأسطر) تحت عمود الكمية، وخانة سعر الوحدة
+// فارغة، والإجمالي المالي في عمود قيمة السطر — وهو `amountText` نفسه المطبوع في صندوق
+// «قيمة الفاتورة» بلا أي حساب جديد.
+const totalRowCells = (markup) => {
+  const m = markup.match(/<tr class="items-total">([\s\S]*?)<\/tr>/);
+  return m ? [...m[1].matchAll(/<td>([\s\S]*?)<\/td>/g)].map((c) => c[1]) : null;
+};
+const qtyGroups = (cell) => [...String(cell).matchAll(/<span class="qg">\u200f<span class="qv">([^<]*)<\/span>(?: <span class="qu">([^<]*)<\/span>)?<\/span>/g)]
+  .map((g) => `${g[1]} ${g[2] || ""}`.trim());
+const linesOf = (spec) => spec.map(([value, unit]) => ({ qtyParts: { value, unit, detailValue: "", detailUnit: "" } }));
+
+test("سطر الإجمالي: آخر سطر في الجدول، أربع خانات، سعر الوحدة فارغ والمبلغ هو قيمة الفاتورة نفسها", () => {
+  const cells = totalRowCells(reference);
+  assert.ok(cells, "لا سطر إجمالي");
+  assert.equal(cells.length, 4, "عدد خانات سطر الإجمالي");
+  assert.equal(cells[0], "الإجمالي");
+  assert.ok(/^<span class="qty">[\s\S]*<\/span>$/.test(cells[1]), "الكمية ليست بتركيب الخانة الهندسي نفسه");
+  assert.equal(cells[2], "", "خانة سعر الوحدة ليست فارغة");
+  assert.equal(cells[3], `<bdi>${own(saleInvoiceDocument(base())).amountText}</bdi>`, "المبلغ ليس قيمة الفاتورة المطبوعة");
+  assert.ok(/<tr class="items-total">[\s\S]*?<\/tr><\/tbody>/.test(reference), "سطر الإجمالي ليس آخر الجدول");
+  assert.ok(invoiceJs.includes(".ozk-inv .items-table tr.items-total td{background:#ece6d4;font-weight:900}"), "السطر لم يعد عريضاً بخلفية الرأس");
+});
+
+test("سطر الإجمالي: مجموع ما طُبع في عمود الكمية لكل وحدة، بالكسور تماماً", () => {
+  const sum = (spec) => own(OZK_INVOICE.quantityTotals(linesOf(spec))).map((t) => `${t.value} ${t.unit}`.trim());
+  assert.deepEqual(sum([["2.5", "كرتونة"], ["0.25", "كرتونة"], ["3", "كرتونة"], ["0.12", "كرتونة"]]), ["5.87 كرتونة"]);
+  assert.deepEqual(sum([["0.1", "كف"], ["0.2", "كف"]]), ["0.3 كف"], "خطأ فاصلة عائمة");
+  assert.deepEqual(sum([["1,250.5", "كروز"], ["0.125", "كروز"]]), ["1,250.625 كروز"], "فاصلة الآلاف أو المنزلة الثالثة");
+  assert.deepEqual(sum([["2", "كرتونة"], ["107.6", "كف"], ["1.5", "كرتونة"], ["20.4", "كف"]]), ["3.5 كرتونة", "128 كف"], "وحدتان جُمعتا معاً");
+  assert.deepEqual(sum([["2", "كرتونة"], ["—", ""]]), ["2 كرتونة"], "سطر بلا كمية أضاف شيئاً");
+  assert.deepEqual(sum([["2", "كرتونة"], ["NaN", "كرتونة"]]), [], "كمية غير مقروءة ⇒ لا مجموع");
+  assert.deepEqual(own(OZK_INVOICE.quantityTotals([{ qtyParts: { value: "2", unit: "كرتونة" } }, { qtyText: "3 كرتونة" }])), [],
+    "سطر بلا أجزاء ⇒ لا مجموع ناقص");
+});
+
+test("سطر الإجمالي: عدد الأسطر لا يدخل — الكمية مجموع لا عدّ، والتوضيح (الكروز) لا يُضاف", () => {
+  const lines = [
+    { material: "أ", qty: 125, qtyUnits: 2.5, unit1: "كروز", unit2: "كرتونة", price: 280 },
+    { material: "ب", qty: 150, qtyUnits: 3, unit1: "كروز", unit2: "كرتونة", price: 190.5 }
+  ];
+  const markup = html({ lines, amount: 1271.5 });
+  assert.deepEqual(qtyGroups(totalRowCells(markup)[1]), ["5.5 كرتونة"]);
+  // مجموع المطبوع سطراً سطراً يساوي المطبوع في سطر الإجمالي.
+  const printed = lines.map((l) => Number(own(invoiceLineQtyParts(l)).value));
+  assert.equal(printed.reduce((a, b) => a + b, 0), 5.5);
+});
+
+test("سطر الإجمالي: لا يغيّر أي رقم مالي — صفوف الدفتر وقيمة الفاتورة كما هي", () => {
+  const doc = own(saleInvoiceDocument(base()));
+  assert.equal(doc.amountText, "505.00");
+  assert.deepEqual(doc.rows.map((r) => [r.label, r.value]), own(voucherLedgerRows(base())).map((r) => [r.label, r.value]));
+  assert.ok(!("qtyTotals" in doc), "المحوّل صار يحسب شيئاً جديداً");
+  // فاتورة بلا أسطر: لا جدول ولا سطر إجمالي.
+  assert.ok(!html({ lines: [] }).includes('<tr class="items-total">'));
 });
 
 // ===== النتيجة =====

@@ -65,6 +65,10 @@ check("ختام الفاتورة كتلة واحدة لا تنشطر",
   invJs.includes(".ozk-inv .inv-closing{page-break-inside:avoid;break-inside:avoid}"));
 check("الأرصدة والملاحظة وصفة البيع والختم والتذييل داخل .inv-closing بهذا الترتيب",
   /<div class="inv-closing">\s*<table>\$\{infoRows\}<\/table>\s*<p class="muted"[^\n]*\n\s*\$\{kind\.legal \? legalBox\(esc\) : ""\}\s*\$\{kind\.seal \? SEAL : ""\}\s*<div class="rfoot">[^\n]*\n\s*<\/div>/.test(invJs));
+// سطر «الإجمالي» (2026-11-28) يضيف نحو 23px؛ حشوة خلايا الأصناف 3px ⇒ 2px تعوّضها، فتبقى
+// الورقة الواحدة حتى 15 صنفاً بأطول أرصدة (قِيس بلا تعويض: 14 فقط).
+check("حشوة خلايا الأصناف الرأسية 2px (تعويض ارتفاع سطر الإجمالي)",
+  invJs.includes(".ozk-inv .items-table td{padding:2px 8px}"));
 check("أحجام الخط لم تُصغَّر (الجدول 12px والرأس 11px)",
   invJs.includes(".ozk-inv table{width:100%;border-collapse:collapse;font-size:12px}")
   && /\.ozk-inv th\{[^}]*font-size:11px/.test(invJs));
@@ -181,8 +185,9 @@ try {
     await printPage.evaluate((h) => { document.open(); document.write(h); document.close(); }, html);
     await printPage.waitForLoadState("load");
     await printPage.evaluate(() => document.fonts.ready);
-    const rows = await printPage.evaluate(() => document.querySelectorAll(".items-table tbody tr").length);
-    return { ops: textOpsPerPage(await printPage.pdf({ format: "A4", printBackground: true, preferCSSPageSize: true })), rows, fitZoom };
+    const rows = await printPage.evaluate(() => document.querySelectorAll(".items-table tbody tr:not(.items-total)").length);
+    const totals = await printPage.evaluate(() => document.querySelectorAll(".items-table tbody tr.items-total").length);
+    return { ops: textOpsPerPage(await printPage.pdf({ format: "A4", printBackground: true, preferCSSPageSize: true })), rows, totals, fitZoom };
   };
 
   // 1) الفاتورة المبلَّغ عنها: 11 صنفاً، بأرصدة قصيرة وطويلة وأسماء طويلة ⇒ ورقة واحدة
@@ -212,6 +217,7 @@ try {
     check(`اللابتوب ${n} صنفاً: ${r.ops.length} ورقة، لا ورقة شبه فارغة (${r.ops.join("/")})`, nearEmpty.length === 0);
     if (n <= DESK_ONE_PAGE_UP_TO) check(`اللابتوب ${n} صنفاً: ورقة واحدة`, r.ops.length === 1);
     check(`اللابتوب ${n} صنفاً: كل الأصناف مطبوعة (${r.rows}/${n})`, r.rows === n);
+    check(`اللابتوب ${n} صنفاً: سطر «الإجمالي» مرة واحدة آخر الجدول (${r.totals})`, r.totals === 1);
   }
 
   // 3) الهاتف: لا فشل تصدير بسبب بياض الدفع، والقصيرة ورقة واحدة
