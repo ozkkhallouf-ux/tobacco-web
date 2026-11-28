@@ -63,7 +63,7 @@ const MEASURE = `(source) => {
   };
   const qtyRows = [...source.querySelectorAll(".items-table tbody tr")].map((tr) =>
     [...tr.children[1].querySelectorAll(".qg")].map((g) => g.textContent.replace(/[\\u200e\\u200f]/g, "").replace(/\\s+/g, " ").trim()));
-  const priceRows = [...source.querySelectorAll(".items-table tbody tr")].map((tr) => tr.children[2].textContent.trim());
+  const priceRows = [...source.querySelectorAll(".items-table tbody tr:not(.items-total)")].map((tr) => tr.children[2].textContent.trim());
   return { note: words(source.querySelector("p.muted")), foot: words(source.querySelector(".rfoot span")), qtyRows, priceRows };
 }`;
 
@@ -128,7 +128,8 @@ try {
     assert.ok(got.master, `${label}: لم يصل إلى القالب الرئيسي`);
     assertBrand(got.m.note, `${label} — الملاحظة`);
     assertBrand(got.m.foot, `${label} — التذييل`);
-    assert.deepEqual(got.m.qtyRows, [["107.6 كروز"], ["11.4 كروز"]], `${label}: خانة الكمية ${JSON.stringify(got.m.qtyRows)}`);
+    // الصفّان ثم سطر «الإجمالي» الأخير: مجموع الكمية الكسرية 107.6 + 11.4 = 119 كروز.
+    assert.deepEqual(got.m.qtyRows, [["107.6 كروز"], ["11.4 كروز"], ["119 كروز"]], `${label}: خانة الكمية ${JSON.stringify(got.m.qtyRows)}`);
     // السعر بوحدة الكمية المعروضة (مراجعة Codex): 107.6 × 12.8 = 1,377.28.
     assert.deepEqual(got.m.priceRows, ["12.8 $ / كروز", "14.2 $ / كروز"], `${label}: خانة السعر ${JSON.stringify(got.m.priceRows)}`);
     console.log(`  ✅ ${label}: OZK TOBACCO بلا تداخل في الملاحظة والتذييل، والكمية 107.6 كروز / 11.4 كروز بسعر الكروز`);
