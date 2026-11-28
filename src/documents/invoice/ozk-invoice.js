@@ -61,9 +61,10 @@ const OZK_INVOICE = (() => {
 .ozk-inv .seal .s-info{font-size:10.5px;font-weight:700}
 .ozk-inv .seal .s-addr{font-size:11px;font-weight:700;border-top:1px solid #16357a;margin-top:4px;padding-top:3px}
 .ozk-inv .inv-closing{page-break-inside:avoid;break-inside:avoid}
-.ozk-inv .items-table td{padding:3px 8px}.ozk-inv .items-table th{padding:4px 8px}
+.ozk-inv .items-table td{padding:2px 8px}.ozk-inv .items-table th{padding:4px 8px}
 .ozk-inv .inv-closing td,.ozk-inv .inv-closing th{padding:3px 8px}
 .ozk-inv .inv-closing .stamp-wrap{margin-top:10px}.ozk-inv .inv-closing .rfoot{margin-top:10px}
+.ozk-inv .items-table tr.items-total td{background:#ece6d4;font-weight:900}
 </style>`;
 
   // ==========================================================================
@@ -198,6 +199,45 @@ const OZK_INVOICE = (() => {
     return `<span class="qty">${main}${detail}</span>`;
   }
 
+  // سطر الإجمالي أسفل جدول الأصناف: مجموع ما طُبع فعلاً في عمود الكمية، لا عدد
+  // الأسطر ولا عدد الأصناف. ليس حساباً محاسبياً: يجمع أرقام الخانة نفسها كما وصلت
+  // نصّاً من `invoiceLineQtyParts` (`formatMoney`: أرقام وفواصل آلاف ونقطة، حتى ثلاث
+  // منازل)، فيطابق المجموعُ مجموعَ ما يقرؤه الزبون سطراً سطراً بلا تقريب ثانٍ.
+  // الجمع بأجزاء الألف صحيحةً (0.1 + 0.2 = 0.3 لا 0.30000000000000004).
+  // لا يُجمع صنفان مختلفا الوحدة: لكل وحدة مجموعها وبترتيب أول ظهور (كرتونة ثم كف).
+  // التوضيح الثانوي (الكروز تحت الكرتونة) لا يدخل: هو الكمية نفسها بوحدة أخرى.
+  // سطر بلا كمية («—») لا يضيف شيئاً. وأي كمية لا تُقرأ رقماً صريحاً ⇐ لا مجموع
+  // إطلاقاً بدل مجموع ناقص.
+  const QTY_NUMBER = /^-?\d{1,3}(,\d{3})*(\.\d+)?$/;
+  function quantityTotals(lines) {
+    const totals = new Map();
+    for (const line of lines) {
+      const parts = line.qtyParts;
+      if (!parts) return [];
+      const value = String(parts.value || "").trim();
+      if (value === "" || value === "—") continue;
+      if (!QTY_NUMBER.test(value)) return [];
+      const unit = String(parts.unit || "").trim();
+      const milli = Math.round(Number(value.replace(/,/g, "")) * 1000);
+      totals.set(unit, (totals.get(unit) || 0) + milli);
+    }
+    const fmt = new Intl.NumberFormat("en-US", { maximumFractionDigits: 3 });
+    return [...totals].map(([unit, milli]) => ({ value: fmt.format(milli / 1000), unit }));
+  }
+
+  // نفس بناء خانة الكمية الهندسي أعلاه (مجموعة لكل وحدة، الرقم والوحدة عائمان)
+  // كي تُرسم على الهاتف كما تُرسم خانات الأسطر تماماً.
+  function totalRowHtml(doc, lines, esc) {
+    const groups = quantityTotals(lines).map((t) => {
+      const atoms = [`<span class="qv">${esc(t.value)}</span>`, t.unit ? `<span class="qu">${esc(t.unit)}</span>` : ""]
+        .filter(Boolean).join(" ");
+      return `<span class="qg">\u200f${atoms}</span>`;
+    }).join("");
+    const qty = groups ? `<span class="qty">${groups}</span>` : "";
+    return `<tr class="items-total"><td>الإجمالي</td><td>${qty}</td><td></td>`
+      + `<td><bdi>${esc(doc.amountText || "")}</bdi></td></tr>`;
+  }
+
   function itemsTableHtml(doc, kind, esc) {
     const lines = Array.isArray(doc.lines) ? doc.lines : [];
     if (!lines.length) return "";
@@ -215,7 +255,7 @@ const OZK_INVOICE = (() => {
     <table class="items-table">
       ${ITEMS_COLGROUP}
       <thead><tr>${COLUMN_HEADS.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead>
-      <tbody>${body}</tbody>
+      <tbody>${body}${totalRowHtml(doc, lines, esc)}</tbody>
     </table>`;
   }
 
@@ -269,7 +309,7 @@ const OZK_INVOICE = (() => {
   </div>`;
   }
 
-  return { STYLE, SEAL, SEAL_COLOR, KINDS, legalBox, markup, COLUMN_WIDTHS, COLUMN_HEADS };
+  return { STYLE, SEAL, SEAL_COLOR, KINDS, legalBox, markup, quantityTotals, COLUMN_WIDTHS, COLUMN_HEADS };
 })();
 
 if (typeof window !== "undefined") window.OZK_INVOICE = OZK_INVOICE;

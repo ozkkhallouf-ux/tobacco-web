@@ -1188,14 +1188,16 @@ test("القالب المشترك: بلا الخيار الناتج حرفياً
   }
 });
 
-test("القالب بالخيار: عمودا سعر الوحدة والإجمالي بعملة الفاتورة، وسطر الإجمالي يمتد على 4 أعمدة", () => {
+test("القالب بالخيار: عمودا سعر الوحدة والإجمالي بعملة الفاتورة، وسطر الإجمالي: الكميات تحت عمودها وسعر الوحدة فارغ", () => {
   const header = model.headerFromRow(headerRow(), DEFAULTS);
   const priced = priceInvoiceItems(model.buildInvoice(header, [PACK, CARTON], 250), [PACK, CARTON]).inv;
   const html = template.buildInvoiceHtml(priced, { linePrices: true });
   assert.match(html, /<th>الكمية<\/th><th class="num">سعر الوحدة<\/th><th class="num">الإجمالي<\/th><\/tr><\/thead>/);
   assert.match(html, /<td>2 كرتونة<\/td><td class="num"><span dir="ltr">\$ 286<\/span><\/td><td class="num"><span dir="ltr">\$ 572<\/span><\/td>/);
   assert.match(html, /<td>30 علبة<\/td><td class="num"><span dir="ltr">\$ 1.5<\/span><\/td><td class="num"><span dir="ltr">\$ 45<\/span><\/td>/);
-  assert.match(html, /<td colspan="4">إجمالي الفاتورة<\/td>/);
+  // سطر الإجمالي: مجموع الكميات تحت عمود الكمية (لكل وحدة مجموعها بترتيب أول ظهور)، خانة سعر الوحدة
+  // فارغة، والإجمالي المالي في عموده كما كان (inv.total نفسه).
+  assert.match(html, /<td colspan="2">إجمالي الفاتورة<\/td>\s*<td>30 علبة<br>2 كرتونة<\/td>\s*<td class="num"><\/td>\s*<td class="num"><span dir="ltr">\$ 617<\/span><\/td>/);
   assert.match(html, /tr \{ break-inside:avoid; \}/, "السطر لا ينشطر بين صفحتين");
   const syp = template.buildInvoiceHtml({ ...priced, currencyIso: "SYP" }, { linePrices: true });
   assert.match(syp, /<td class="num"><span dir="ltr">286<\/span> ل.س<\/td>/);
@@ -1329,7 +1331,8 @@ test("PDF حقيقي بالأسعار: 45 سطراً بوحدتين مختلفت
     assert.ok(job, "مهمة واحدة");
     assert.equal(fontOk, true, "Cairo محمَّل");
     assert.ok(pages >= 2, `عدة صفحات (${pages})`);
-    assert.equal((html.match(/<td class="num">/g) || []).length, 90, "سعر وإجمالي لكل سطر من 45");
+    // سعر وإجمالي لكل سطر من 45، وخانتا سطر الإجمالي (سعر فارغ + الإجمالي المالي).
+    assert.equal((html.match(/<td class="num">/g) || []).length, 92, "سعر وإجمالي لكل سطر من 45 + خانتا سطر الإجمالي");
     assert.equal(job.amount, Math.round((total - 10 + 0.25) * 1000) / 1000, "المبلغ = الصافي");
     const pdf = fs.readFileSync(store.pdfPath(job.jobId));
     assert.match(pdf.toString("latin1"), /Cairo/, "الخط مضمَّن في الملف");

@@ -51,6 +51,9 @@ const CASES = [
   { material: "معسل فاخر اسود",  qty: 25, unit1: "كروز", qtyUnits: 1,    unit2: "شرحة",   price: 6,     value: "1",    detail: "25" }
 ];
 const expectedLines = (c) => [`${c.value} ${c.unit2}`, `${c.detail} ${c.unit1}`];
+// سطر «الإجمالي» الأخير (2026-11-28): مجموع الكميات المطبوعة لكل وحدة بالتركيب الهندسي
+// نفسه، فيُقاس تحت النماذج الأربعة كبقية الأسطر: 1 + 0.5 + 0.12 كرتونة، و1 شرحة.
+const TOTAL_LINES = ["1.62 كرتونة", "1 شرحة"];
 
 // ===== 1) الدوال الحقيقية من المصدر، لا نسخة مبسّطة =====
 
@@ -158,9 +161,12 @@ const MEASURE = `(rootSelector) => {
   });
 }`;
 
-const assertRows = (rows, model) => {
-  assert.ok(Array.isArray(rows) && rows.length === CASES.length,
-    `${model}: لم تصل أسطر الفاتورة كاملة (${rows && rows.length})`);
+const assertRows = (allRows, model) => {
+  assert.ok(Array.isArray(allRows) && allRows.length === CASES.length + 1,
+    `${model}: لم تصل أسطر الفاتورة كاملة مع سطر الإجمالي (${allRows && allRows.length})`);
+  const rows = allRows.slice(0, CASES.length);
+  assert.deepEqual(allRows[CASES.length], TOTAL_LINES,
+    `${model} — سطر الإجمالي: الترتيب البصري ${JSON.stringify(allRows[CASES.length])} والمطلوب ${JSON.stringify(TOTAL_LINES)}`);
   rows.forEach((lines, i) => {
     const want = expectedLines(CASES[i]);
     assert.deepEqual(lines, want,
